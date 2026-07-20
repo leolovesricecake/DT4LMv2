@@ -1,0 +1,1 @@
+textattack train --model-name-or-path google/t5-v1_1-base --dataset user_name/sst2 --model-max-length 128 --per-device-train-batch-size 32 --per-device-eval-batch-size 128 --epochs 8 --learning-rate 3e-5

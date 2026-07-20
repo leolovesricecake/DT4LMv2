@@ -1,0 +1,1 @@
+textattack train --model-name-or-path albert/albert-base-v1 --dataset user_name/sst2 --model-max-length 256 --per-device-train-batch-size 64 --per-device-eval-batch-size 256 --epochs 8 --learning-rate 2e-5

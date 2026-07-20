@@ -1,0 +1,1 @@
+textattack attack --recipe pair --base-recipe faster-alzantot --num-examples 1000 --model ../outputs/albertbasev2_sst2/best_model/ --second-model ../outputs/albertbasev1_sst2/best_model/ --parallel --num-workers-per-device 8 --dataset-from-huggingface user_name/sst2 --dataset-split test

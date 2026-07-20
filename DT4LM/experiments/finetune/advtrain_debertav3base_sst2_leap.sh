@@ -1,0 +1,1 @@
+textattack train --model-name-or-path microsoft/deberta-v3-base --dataset user_name/adv_training_dataset_obtained_from_ipynb --model-max-length 256 --per-device-train-batch-size 32 --per-device-eval-batch-size 128 --epochs 5 --learning-rate 1e-5
