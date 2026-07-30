@@ -18,6 +18,9 @@ torch.cuda.empty_cache()
 class HuggingFaceModelWrapper(PyTorchModelWrapper):
     """Loads a HuggingFace ``transformers`` model and tokenizer."""
 
+    # Sequence-classification ``ModelOutput.logits`` is returned verbatim.
+    classification_score_type = "logits"
+
     def __init__(self, model, tokenizer):
         assert isinstance(
             model, (transformers.PreTrainedModel, T5ForTextToText)
@@ -66,9 +69,8 @@ class HuggingFaceModelWrapper(PyTorchModelWrapper):
             # list of outputs.
             return outputs
         else:
-            # HuggingFace classification models return a tuple as output
-            # where the first item in the tuple corresponds to the list of
-            # scores for each input.
+            # Reading the named field makes the logits contract explicit and
+            # avoids treating a tuple's first item as an inferred score type.
             return outputs.logits
 
     def get_grad(self, text_input):

@@ -15,6 +15,7 @@ from textattack.metrics.quality_metrics import Perplexity, USEMetric
 from . import (
     CSVLogger,
     FileLogger,
+    JSONLLogger,
     JsonSummaryLogger,
     VisdomLogger,
     WeightsAndBiasesLogger,
@@ -56,6 +57,11 @@ class AttackLogManager:
 
     def add_output_summary_json(self, filename):
         self.loggers.append(JsonSummaryLogger(filename=filename))
+
+    def add_output_jsonl(self, filename):
+        """Register the lossless result logger used by experiment scripts."""
+
+        self.loggers.append(JSONLLogger(filename=filename))
 
     def log_result(self, result):
         """Logs an ``AttackResult`` on each of `self.loggers`."""

@@ -49,6 +49,7 @@ checkpoints/
 *.swp
 
 .vscode
+**.secert.yaml
 *.csv
 !tests/sample_outputs/csv_attack_log.csv
 tests/test_command_line/attack_log.txt

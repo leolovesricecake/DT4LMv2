@@ -22,7 +22,7 @@ class PyTorchModelWrapper(ModelWrapper):
             No type requirement, but most have `tokenizer` method that accepts list of strings.
     """
 
-    def __init__(self, model, tokenizer):
+    def __init__(self, model, tokenizer, classification_score_type=None):
         if not isinstance(model, torch.nn.Module):
             raise TypeError(
                 f"PyTorch model must be torch.nn.Module, got type {type(model)}"
@@ -30,6 +30,9 @@ class PyTorchModelWrapper(ModelWrapper):
 
         self.model = model
         self.tokenizer = tokenizer
+        # Custom PyTorch models vary between logits and probabilities, so pair
+        # attacks require callers to state which representation is returned.
+        self.classification_score_type = classification_score_type
 
     def to(self, device):
         self.model.to(device)

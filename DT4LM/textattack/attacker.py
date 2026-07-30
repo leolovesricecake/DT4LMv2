@@ -4,12 +4,16 @@ Attacker Class
 """
 
 import collections
+import hashlib
+import json
 import logging
 import multiprocessing as mp
 import os
 import queue
 import random
+import re
 import traceback
+import time
 from datasets import Dataset, Features, ClassLabel, Value
 
 import torch
@@ -86,9 +90,156 @@ class Attacker:
         self.dataset = dataset
         self.attack_args = attack_args
         self.attack_log_manager = None
+        observer = getattr(self.attack.goal_function, "candidate_observer", None)
+        manifest = getattr(self.dataset, "manifest", None)
+        if manifest is not None and self.attack.goal_function.model2 is not None:
+            self._validate_manifest_model_pair(manifest)
+        if observer is not None and manifest is not None:
+            # Candidate rows inherit immutable provenance from the exact train
+            # manifest used for calibration, not merely CLI display strings.
+            observer.metadata.update(
+                {
+                    "dataset_revision_or_fingerprint": (
+                        manifest.dataset_revision_or_fingerprint
+                    ),
+                    "manifest_seed": manifest.seed,
+                    "new_model_id": manifest.new_model_id,
+                    "new_model_revision": manifest.new_model_revision,
+                    "old_model_id": manifest.old_model_id,
+                    "old_model_revision": manifest.old_model_revision,
+                }
+            )
+
+        # The hash excludes values whose names imply credentials. It identifies
+        # behaviorally relevant run settings without risking secret leakage.
+        public_config = {
+            key: value
+            for key, value in vars(attack_args).items()
+            if "key" not in key.lower() and "secret" not in key.lower()
+        }
+        encoded_config = json.dumps(
+            public_config, sort_keys=True, default=repr
+        ).encode("utf-8")
+        self.run_config_hash = hashlib.sha256(encoded_config).hexdigest()
 
         # This is to be set if loading from a checkpoint
         self._checkpoint = None
+
+    def _validate_manifest_model_pair(self, manifest):
+        """Fail before queries if a frozen manifest targets other checkpoints."""
+
+        wrappers = (
+            ("new", self.attack.goal_function.model, manifest.new_model_id,
+             manifest.new_model_revision,
+             getattr(self.attack_args, "model_revision", None)),
+            ("old", self.attack.goal_function.model2, manifest.old_model_id,
+             manifest.old_model_revision,
+             getattr(self.attack_args, "second_model_revision", None)),
+        )
+        for (
+            role,
+            wrapper,
+            expected_id,
+            expected_revision,
+            configured_revision,
+        ) in wrappers:
+            config = getattr(wrapper.model, "config", None)
+            if config is None:
+                raise ValueError(f"The {role} model has no configuration metadata.")
+            actual_id = str(getattr(config, "_name_or_path", ""))
+            if os.path.exists(expected_id) or os.path.exists(actual_id):
+                expected_comparable = os.path.realpath(expected_id)
+                actual_comparable = os.path.realpath(actual_id)
+            else:
+                expected_comparable = expected_id
+                actual_comparable = actual_id
+            if actual_comparable and expected_comparable != actual_comparable:
+                raise ValueError(
+                    f"The {role} model does not match the frozen manifest: "
+                    f"{actual_comparable!r} != {expected_comparable!r}."
+                )
+            actual_revision = (
+                getattr(config, "_commit_hash", None)
+                or configured_revision
+                or actual_id
+            )
+            # Local checkpoints commonly identify their path as the revision;
+            # Hub checkpoints expose an immutable commit hash.
+            if expected_revision and actual_revision != expected_revision:
+                raise ValueError(
+                    f"The {role} model revision does not match the manifest: "
+                    f"{actual_revision!r} != {expected_revision!r}."
+                )
+
+        label_names = getattr(self.dataset, "label_names", None)
+        if label_names:
+            config = self.attack.goal_function.model.model.config
+            if len(label_names) != int(config.num_labels):
+                raise ValueError(
+                    "Dataset label count does not match the model label count."
+                )
+            id2label = getattr(config, "id2label", {}) or {}
+            if len(id2label) != int(config.num_labels):
+                # A missing semantic mapping still has an unambiguous identity
+                # index mapping after the class-count check above.
+                return
+            model_labels = [
+                str(id2label.get(index, id2label.get(str(index)))).strip().lower()
+                for index in range(config.num_labels)
+            ]
+            dataset_labels = [str(label).strip().lower() for label in label_names]
+            generic = all(
+                re.fullmatch(r"label[_ -]?\d+", label) for label in model_labels
+            )
+            if not generic and model_labels != dataset_labels:
+                raise ValueError(
+                    "Dataset label names do not match model id2label order: "
+                    f"{dataset_labels!r} != {model_labels!r}."
+                )
+
+    def _profiled_constraint(self):
+        """Return the single online resource-profiled constraint, if present."""
+
+        profiled = [
+            constraint
+            for constraint in self.attack.constraints
+            if hasattr(constraint, "profile_dict") and hasattr(constraint, "profile")
+        ]
+        if len(profiled) > 1:
+            raise ValueError("Only one profiled constraint is supported per attack.")
+        return profiled[0] if profiled else None
+
+    @staticmethod
+    def _profile_delta(constraint, before, peak_vram_bytes):
+        """Derive per-example NLI counters from cumulative runtime state."""
+
+        after = vars(constraint.profile)
+        delta = {
+            key: after[key] - before[key]
+            for key in after
+            if key != "peak_vram_bytes"
+        }
+        lookups = delta["cache_hits"] + delta["cache_misses"]
+        delta["cache_hit_rate"] = (
+            delta["cache_hits"] / lookups if lookups else None
+        )
+        delta["seconds_per_candidate"] = (
+            delta["inference_seconds"] / delta["candidates"]
+            if delta["candidates"]
+            else None
+        )
+        delta["truncated_directional_pair_rate"] = (
+            delta["truncated_directional_pairs"] / delta["directional_pairs"]
+            if delta["directional_pairs"]
+            else None
+        )
+        delta["truncated_candidate_rate"] = (
+            delta["truncated_candidates"] / delta["candidates"]
+            if delta["candidates"]
+            else None
+        )
+        delta["peak_vram_bytes"] = peak_vram_bytes
+        return delta
 
     def _get_worklist(self, start, end, num_examples, shuffle):
         if end - start < num_examples:
@@ -191,12 +342,53 @@ class Attacker:
             except IndexError:
                 continue
             example = textattack.shared.AttackedText(example)
+            source_index = (
+                self.dataset.source_index(idx)
+                if hasattr(self.dataset, "source_index")
+                else idx
+            )
+            example.attack_attrs["dataset_index"] = source_index
+            example.attack_attrs["run_config_hash"] = self.run_config_hash
+            example.attack_attrs["ground_truth_output"] = int(ground_truth_output)
             if self.dataset.label_names is not None:
                 example.attack_attrs["label_names"] = self.dataset.label_names
+                if int(ground_truth_output) < len(self.dataset.label_names):
+                    example.attack_attrs["ground_truth_label_name"] = str(
+                        self.dataset.label_names[int(ground_truth_output)]
+                    )
+            observer = getattr(self.attack.goal_function, "candidate_observer", None)
+            if observer is not None and hasattr(observer, "start_example"):
+                observer.start_example(
+                    dataset_index=source_index,
+                    original_text=example,
+                    ground_truth_output=ground_truth_output,
+                )
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+            profiled_constraint = self._profiled_constraint()
+            profile_before = (
+                dict(vars(profiled_constraint.profile))
+                if profiled_constraint is not None
+                else None
+            )
+            started_at = time.perf_counter()
             try:
                 result = self.attack.attack(example, ground_truth_output)
             except Exception as e:
                 raise e
+            result.wall_clock_seconds = time.perf_counter() - started_at
+            result.peak_vram_bytes = (
+                torch.cuda.max_memory_allocated()
+                if torch.cuda.is_available()
+                else 0
+            )
+            result.nli_profile = (
+                self._profile_delta(
+                    profiled_constraint, profile_before, result.peak_vram_bytes
+                )
+                if profiled_constraint is not None
+                else None
+            )
             if (
                 isinstance(result, SkippedAttackResult) and self.attack_args.attack_n
             ) or (
@@ -693,6 +885,17 @@ class Attacker:
         if self.attack_args.query_budget:
             self.attack.goal_function.query_budget = self.attack_args.query_budget
 
+        if self.attack_args.parallel and getattr(
+            self.attack.goal_function, "candidate_observer", None
+        ):
+            # Candidate collection is intentionally serial so one append-only
+            # stream has deterministic order and no cross-process corruption.
+            raise ValueError("Candidate observation cannot run with --parallel.")
+        if self.attack_args.parallel and self._profiled_constraint() is not None:
+            # Worker-local NLI counters cannot be merged by the legacy
+            # multiprocessing path without losing cache and timing semantics.
+            raise ValueError("Profiled SemDT runs currently require serial execution.")
+
         if not self.attack_log_manager:
             self.attack_log_manager = AttackArgs.create_loggers_from_args(
                 self.attack_args
@@ -719,10 +922,32 @@ class Attacker:
         else:
             self._attack()
 
+        self._write_nli_profile()
         if self.attack_args.silent:
             logger.setLevel(logging.INFO)
 
         return self.attack_log_manager.results
+
+    def _write_nli_profile(self):
+        """Persist online NLI costs after all serial attack examples finish."""
+
+        output_path = getattr(self.attack_args, "nli_profile_output", None)
+        if not output_path:
+            return
+        constraint = self._profiled_constraint()
+        if constraint is None:
+            raise ValueError(
+                "An NLI profile output requires exactly one profiled constraint."
+            )
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                constraint.profile_dict(),
+                handle,
+                ensure_ascii=True,
+                indent=2,
+                sort_keys=True,
+            )
 
     def update_attack_args(self, **kwargs):
         """To update any attack args, pass the new argument as keyword argument

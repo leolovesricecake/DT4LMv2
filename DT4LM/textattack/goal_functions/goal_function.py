@@ -42,6 +42,7 @@ class GoalFunction(ReprMixin, ABC):
         model_batch_size=32,
         model_cache_size=2**20,
         attack_args=None,
+        candidate_observer=None,
     ):
         validators.validate_model_goal_function_compatibility(
             self.__class__, model_wrapper.model.__class__
@@ -59,6 +60,7 @@ class GoalFunction(ReprMixin, ABC):
         self.query_budget = query_budget
         self.batch_size = model_batch_size
         self.attack_args = attack_args
+        self.candidate_observer = candidate_observer
         if self.use_cache:
             self._call_model_cache = lru.LRU(model_cache_size)
             self._call_model_2_cache = lru.LRU(model_cache_size)
@@ -103,8 +105,16 @@ class GoalFunction(ReprMixin, ABC):
         """
         results = []
         if self.query_budget < float("inf"):
-            queries_left = self.query_budget - self.num_queries
+            queries_left = max(0, int(self.query_budget - self.num_queries))
             attacked_text_list = attacked_text_list[:queries_left]
+        if self.candidate_observer and attacked_text_list and not check_skip:
+            # Observation happens after budget truncation and immediately before
+            # either victim model is queried, matching the actual search trace.
+            self.candidate_observer.observe(
+                attacked_text_list,
+                num_queries_before=self.num_queries,
+                query_budget=self.query_budget,
+            )
         self.num_queries += len(attacked_text_list) # number of queries to each model in model pair attack
         model_outputs = self._call_model(attacked_text_list)
         if not self.model2:
@@ -135,17 +145,34 @@ class GoalFunction(ReprMixin, ABC):
                 )
                 goal_function_score = self._get_score(raw_output, raw_output_2, self.attack_args, attacked_text)
                 # need to see if this raw_output matters in goalfunctionresult, or if the goal_status suffices!!!!
-                results.append(
-                    self._goal_function_result_type()(
-                        attacked_text,
-                        raw_output, # any modification needed?
-                        displayed_output, # last modification
-                        goal_status,
-                        goal_function_score,
-                        self.num_queries,
-                        self.ground_truth_output,
-                    )
+                compatible_output = getattr(raw_output, "probabilities", raw_output)
+                result = self._goal_function_result_type()(
+                    attacked_text,
+                    compatible_output,
+                    displayed_output,
+                    goal_status,
+                    goal_function_score,
+                    self.num_queries,
+                    self.ground_truth_output,
                 )
+                # Preserve both model outputs without changing TextAttack's
+                # compatibility field, which remains the new-model probability.
+                result.new_model_output = self._serialize_model_output(raw_output)
+                result.old_model_output = self._serialize_model_output(raw_output_2)
+                label = int(self.ground_truth_output)
+                if hasattr(raw_output, "margin"):
+                    # Log the exact role-specific margins used by LexiDT even
+                    # when another objective is selected for this run.
+                    result.new_model_output["objective_margin"] = raw_output.margin(
+                        label, label_should_win=False
+                    )
+                    result.old_model_output["objective_margin"] = (
+                        raw_output_2.margin(label, label_should_win=True)
+                    )
+                result.objective_name = getattr(
+                    getattr(self, "objective", None), "name", None
+                )
+                results.append(result)
             return results, self.num_queries == self.query_budget
 
     def _get_goal_status(self, model_output, attacked_text, check_skip=False):
@@ -202,6 +229,25 @@ class GoalFunction(ReprMixin, ABC):
         """
         raise NotImplementedError()
 
+    def _process_model_outputs_for_wrapper(self, inputs, outputs, model_wrapper):
+        """Process outputs with wrapper metadata when a subclass needs it."""
+
+        del model_wrapper
+        return self._process_model_outputs(inputs, outputs)
+
+    @staticmethod
+    def _serialize_model_output(output):
+        """Convert explicit model outputs into JSON-safe metadata when possible."""
+
+        if hasattr(output, "to_serializable"):
+            return output.to_serializable()
+        return None
+
+    def set_candidate_observer(self, observer):
+        """Attach an observer that records only candidates actually queried."""
+
+        self.candidate_observer = observer
+
     def _call_model_uncached(self, attacked_text_list):
         """Queries model and returns outputs for a list of AttackedText
         objects."""
@@ -242,7 +288,9 @@ class GoalFunction(ReprMixin, ABC):
             outputs
         ), f"Got {len(outputs)} outputs for {len(inputs)} inputs"
 
-        return self._process_model_outputs(attacked_text_list, outputs)
+        return self._process_model_outputs_for_wrapper(
+            attacked_text_list, outputs, self.model
+        )
 
     def _call_model(self, attacked_text_list):
         """Gets predictions for a list of ``AttackedText`` objects.
@@ -313,7 +361,9 @@ class GoalFunction(ReprMixin, ABC):
             outputs
         ), f"Got {len(outputs)} outputs for {len(inputs)} inputs"
 
-        return self._process_model_outputs(attacked_text_list, outputs)
+        return self._process_model_outputs_for_wrapper(
+            attacked_text_list, outputs, self.model2
+        )
 
     def _call_model_2(self, attacked_text_list):
         """Gets predictions for a list of ``AttackedText`` objects.

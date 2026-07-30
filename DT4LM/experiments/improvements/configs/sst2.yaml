@@ -1,0 +1,67 @@
+# First-round SST-2 configuration; all relative paths resolve from DT4LM/.
+seed: 765
+query_budget: 1000
+output_root: outputs/dt4lm-improvements
+
+dataset:
+  id: sst2
+  # This path is the default output of datasets/preprocess_dataset.py.
+  path: outputs/datasets/sst2
+  name: null
+  textattack_spec: outputs/datasets/sst2
+  calibration_split: train
+  # The notebook-derived preprocessing creates a labeled, held-out test split.
+  test_split: test
+  text_columns: [sentence]
+  label_column: label
+  task_definition: Classify the sentence sentiment as negative or positive.
+
+models:
+  old: outputs/albertbasev1_sst2/best_model
+  new: outputs/albertbasev2_sst2/best_model
+  old_revision: null
+  new_revision: null
+
+manifests:
+  train: outputs/dt4lm-improvements/manifests/sst2/train_manifest.json
+  test: outputs/dt4lm-improvements/manifests/sst2/test_manifest.json
+  metadata: outputs/dt4lm-improvements/manifests/sst2/manifest_metadata.json
+
+# Selection policies are hyperparameters; manifest generation never infers them
+# from the dataset name.
+sampling:
+  test:
+    strategy: all
+  calibration_originals:
+    strategy: random_up_to
+    size: 500
+
+nli:
+  model: FacebookAI/roberta-large-mnli
+  revision: null
+  tokenizer_revision: null
+  device: null
+  dtype: float32
+  batch_size: 32
+  candidate_batch_size: 1024
+  max_length: 512
+  truncation_strategy: longest_first
+
+calibration:
+  output_root: outputs/dt4lm-improvements/calibration/sst2
+  # Base candidate collection axes are explicit and reproducible.
+  candidate_collection:
+    base_recipe: kuleshov_var
+    differential_objective: dynamic
+    semantic_constraint: original
+  candidate_sample_size: 1000
+  search_sample_size: 800
+  minimum_validation_positives: 100
+  maximum_total_labels: 2000
+  trajectory_sample_size: 100
+  annotation_batch_size: 32
+  threshold_search:
+    method: grid
+    step: 0.01
+    min_precision: 0.95
+    bootstrap_samples: 10000

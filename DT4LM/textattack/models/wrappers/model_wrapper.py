@@ -18,6 +18,10 @@ class ModelWrapper(ABC):
     input.
     """
 
+    # Differential classification rejects wrappers that leave this unset.
+    # Existing non-differential goal functions retain their legacy behavior.
+    classification_score_type = None
+
     @abstractmethod
     def __call__(self, text_input_list, **kwargs):
         raise NotImplementedError()

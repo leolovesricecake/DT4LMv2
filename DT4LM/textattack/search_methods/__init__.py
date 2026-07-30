@@ -16,3 +16,8 @@ from .alzantot_genetic_algorithm import AlzantotGeneticAlgorithm
 from .improved_genetic_algorithm import ImprovedGeneticAlgorithm
 from .particle_swarm_optimization import ParticleSwarmOptimization
 from .leap import LEAP
+from .comparator_greedy_search import ComparatorGreedySearch
+from .differential_comparators import (
+    LexicographicComparator,
+    ScalarComparator,
+)

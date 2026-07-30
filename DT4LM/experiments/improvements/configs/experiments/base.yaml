@@ -1,0 +1,8 @@
+# DT4LM dynamic baseline; one file defines one independently runnable experiment.
+name: base
+base_recipe: kuleshov_var
+differential_objective: dynamic
+semantic_constraint: original
+semantic_threshold:
+  source: none
+comparison_baseline: null

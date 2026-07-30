@@ -1,0 +1,11 @@
+# SemDT run using only the threshold calibrated by the OpenAI-compatible judge.
+name: semdt-openai
+base_recipe: kuleshov_var
+differential_objective: dynamic
+semantic_constraint: nli
+semantic_threshold:
+  source: calibrated
+  backend: openai
+  # Null resolves to calibration.output_root/<backend>/threshold.json.
+  file: null
+comparison_baseline: base

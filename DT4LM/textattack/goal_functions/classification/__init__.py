@@ -10,3 +10,9 @@ from .classification_goal_function import ClassificationGoalFunction
 from .untargeted_classification import UntargetedClassification
 from .targeted_classification import TargetedClassification
 from .differential_classification import DifferentialClassification
+from .differential_objectives import (
+    DynamicObjective,
+    LexicographicObjective,
+    LexiScore,
+    StaticObjective,
+)

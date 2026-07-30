@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import math
+from types import MappingProxyType
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import flair
@@ -397,8 +398,17 @@ class AttackedText:
         perturbed_text = ""
         original_text = AttackedText.SPLIT_TOKEN.join(self._text_input.values())
         new_attack_attrs = dict()
-        if "label_names" in self.attack_attrs:
-            new_attack_attrs["label_names"] = self.attack_attrs["label_names"]
+        # These immutable identifiers are needed by structured result and
+        # candidate logs after the perturbation chain has advanced.
+        for key in (
+            "label_names",
+            "dataset_index",
+            "run_config_hash",
+            "ground_truth_output",
+            "ground_truth_label_name",
+        ):
+            if key in self.attack_attrs:
+                new_attack_attrs[key] = self.attack_attrs[key]
         new_attack_attrs["newly_modified_indices"] = set()
         # Point to previously monitored text.
         new_attack_attrs["previous_attacked_text"] = self
@@ -532,6 +542,32 @@ class AttackedText:
             return input_tuple[0]
         else:
             return input_tuple
+
+    @property
+    def text_input(self):
+        """Return an immutable copy of named input fields.
+
+        Semantic constraints need field-level access for sentence-pair tasks,
+        but exposing ``_text_input`` directly would let constraints mutate the
+        candidate that is currently cached by the attack.
+        """
+
+        return MappingProxyType(OrderedDict(self._text_input))
+
+    def modification_rate(self, original_text=None) -> float:
+        """Return DT4LM's word-level replacement cost.
+
+        ``modified_indices`` is maintained relative to the attacked text's
+        original input. Supplying ``original_text`` makes the denominator
+        explicit when callers retain more than one attack root.
+        """
+
+        denominator = (
+            original_text.num_words if original_text is not None else self.num_words
+        )
+        if denominator <= 0:
+            return 0.0
+        return len(self.attack_attrs.get("modified_indices", set())) / denominator
 
     @property
     def column_labels(self) -> List[str]:

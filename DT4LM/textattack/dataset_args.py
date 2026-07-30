@@ -174,7 +174,8 @@ class DatasetArgs:
     dataset_from_file: str = None
     dataset_split: str = None
     filter_by_labels: list = None
-    do_not_push: bool = False
+    do_not_push: bool = True
+    sample_manifest: str = None
 
     @classmethod
     def _add_parser_args(cls, parser):
@@ -217,11 +218,24 @@ class DatasetArgs:
             default=None,
             help="List of labels to keep in the dataset and discard all others.",
         )
-        parser.add_argument(
+        push_group = parser.add_mutually_exclusive_group()
+        push_group.add_argument(
             "--do-not-push",
             action="store_true",
-            default=False,
+            dest="do_not_push",
+            default=True,
             help="Prevent pushing datasets during testing.",
+        )
+        push_group.add_argument(
+            "--push-to-hub",
+            action="store_false",
+            dest="do_not_push",
+            help="Explicitly allow successful examples to be pushed externally.",
+        )
+        parser.add_argument(
+            "--sample-manifest",
+            default=None,
+            help="JSON manifest that fixes eligible dataset indices and order.",
         )
         return parser
 
@@ -305,5 +319,11 @@ class DatasetArgs:
 
         if args.filter_by_labels:
             dataset.filter_by_labels_(args.filter_by_labels)
+
+        if args.sample_manifest:
+            # Manifest filtering happens last so its indices always refer to the
+            # same loaded and label-filtered dataset used during preparation.
+            manifest = textattack.datasets.SampleManifest.load(args.sample_manifest)
+            dataset = textattack.datasets.ManifestDatasetView(dataset, manifest)
 
         return dataset

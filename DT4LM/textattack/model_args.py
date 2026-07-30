@@ -11,6 +11,7 @@ import transformers
 
 import textattack
 from textattack.shared.utils import ARGS_SPLIT_TOKEN, load_module_from_file
+from textattack.models.classification_output import require_wrapper_score_type
 
 HUGGINGFACE_MODELS = {
     #
@@ -137,6 +138,12 @@ class ModelArgs:
     model_from_file: str = None
     model_from_huggingface: str = None
     second_model: str = None
+    model_revision: str = None
+    tokenizer_revision: str = None
+    second_model_revision: str = None
+    second_tokenizer_revision: str = None
+    model_score_type: str = None
+    second_model_score_type: str = None
 
     @classmethod
     def _add_parser_args(cls, parser):
@@ -170,6 +177,38 @@ class ModelArgs:
             required=False,
             default=None,
             help='Name of or path to a second model that should yield correct prediction on the generated examples during model pair attack.',
+        )
+        parser.add_argument(
+            "--model-revision",
+            default=None,
+            help="Optional Hugging Face revision for the new model.",
+        )
+        parser.add_argument(
+            "--tokenizer-revision",
+            default=None,
+            help="Optional tokenizer revision for the new model.",
+        )
+        parser.add_argument(
+            "--second-model-revision",
+            default=None,
+            help="Optional Hugging Face revision for the old model.",
+        )
+        parser.add_argument(
+            "--second-tokenizer-revision",
+            default=None,
+            help="Optional tokenizer revision for the old model.",
+        )
+        parser.add_argument(
+            "--model-score-type",
+            choices=("logits", "probabilities"),
+            default=None,
+            help="Explicit score type for a custom new-model wrapper.",
+        )
+        parser.add_argument(
+            "--second-model-score-type",
+            choices=("logits", "probabilities"),
+            default=None,
+            help="Explicit score type for a custom old-model wrapper.",
         )
 
         return parser
@@ -227,10 +266,12 @@ class ModelArgs:
                 f"Loading pre-trained model from HuggingFace model repository: {colored_model_name}"
             )
             model = transformers.AutoModelForSequenceClassification.from_pretrained(
-                model_name
+                model_name, revision=args.model_revision
             )
             tokenizer = transformers.AutoTokenizer.from_pretrained(
-                model_name, use_fast=True
+                model_name,
+                use_fast=True,
+                revision=args.tokenizer_revision or args.model_revision,
             )
             model = textattack.models.wrappers.HuggingFaceModelWrapper(model, tokenizer)
         elif args.model in TEXTATTACK_MODELS:
@@ -269,7 +310,7 @@ class ModelArgs:
                 )
             else:
                 model = textattack.models.wrappers.PyTorchModelWrapper(
-                    model, model.tokenizer
+                    model, model.tokenizer, classification_score_type="logits"
                 )
         elif args.model and os.path.exists(args.model):
             # Support loading TextAttack-trained models via just their folder path.
@@ -294,17 +335,19 @@ class ModelArgs:
                         f"textattack.models.helpers.{model_class}.from_pretrained({args.model})"
                     )
                     model = textattack.models.wrappers.PyTorchModelWrapper(
-                        model, model.tokenizer
+                        model, model.tokenizer, classification_score_type="logits"
                     )
                 else:
                     # assume the model is from HuggingFace.
                     model = (
                         transformers.AutoModelForSequenceClassification.from_pretrained(
-                            args.model
+                            args.model, revision=args.model_revision
                         )
                     )
                     tokenizer = transformers.AutoTokenizer.from_pretrained(
-                        args.model, use_fast=True
+                        args.model,
+                        use_fast=True,
+                        revision=args.tokenizer_revision or args.model_revision,
                     )
                     model = textattack.models.wrappers.HuggingFaceModelWrapper(
                         model, tokenizer
@@ -315,4 +358,74 @@ class ModelArgs:
         assert isinstance(
             model, textattack.models.wrappers.ModelWrapper
         ), "`model` must be of type `textattack.models.wrappers.ModelWrapper`."
+        if args.model_score_type:
+            # Custom wrappers must opt into a score representation explicitly.
+            model.classification_score_type = args.model_score_type
         return model
+
+    @staticmethod
+    def _create_huggingface_classification_wrapper(
+        model_name,
+        *,
+        model_revision=None,
+        tokenizer_revision=None,
+    ):
+        """Load one sequence-classification model through the shared factory."""
+
+        model = transformers.AutoModelForSequenceClassification.from_pretrained(
+            model_name, revision=model_revision
+        )
+        tokenizer = transformers.AutoTokenizer.from_pretrained(
+            model_name,
+            use_fast=True,
+            revision=tokenizer_revision or model_revision,
+        )
+        return textattack.models.wrappers.HuggingFaceModelWrapper(model, tokenizer)
+
+    @classmethod
+    def _create_second_model_from_args(cls, args):
+        """Create the old-model wrapper used by differential attacks."""
+
+        if not args.second_model:
+            raise ValueError(
+                "Model-pair attacks require --second-model to identify the old model."
+            )
+        wrapper = cls._create_huggingface_classification_wrapper(
+            args.second_model,
+            model_revision=args.second_model_revision,
+            tokenizer_revision=args.second_tokenizer_revision,
+        )
+        if args.second_model_score_type:
+            wrapper.classification_score_type = args.second_model_score_type
+        return wrapper
+
+    @staticmethod
+    def validate_classification_model_pair(new_wrapper, old_wrapper):
+        """Fail early when two wrappers do not share one classification space."""
+
+        require_wrapper_score_type(new_wrapper)
+        require_wrapper_score_type(old_wrapper)
+        new_config = getattr(new_wrapper.model, "config", None)
+        old_config = getattr(old_wrapper.model, "config", None)
+        if new_config is None or old_config is None:
+            raise ValueError("Both model wrappers must expose a model config.")
+        if new_config.num_labels != old_config.num_labels:
+            raise ValueError(
+                "New and old models have different label counts: "
+                f"{new_config.num_labels} and {old_config.num_labels}."
+            )
+
+        # Compare normalized label names when both checkpoints provide them.
+        new_labels = {
+            int(index): str(name).strip().lower()
+            for index, name in getattr(new_config, "id2label", {}).items()
+        }
+        old_labels = {
+            int(index): str(name).strip().lower()
+            for index, name in getattr(old_config, "id2label", {}).items()
+        }
+        if new_labels and old_labels and new_labels != old_labels:
+            raise ValueError(
+                "New and old models expose different id2label mappings: "
+                f"{new_labels!r} != {old_labels!r}."
+            )

@@ -19,8 +19,10 @@ class TensorFlowModelWrapper(ModelWrapper):
     differently.
     """
 
-    def __init__(self, model):
+    def __init__(self, model, classification_score_type=None):
         self.model = model
+        # Keras models may include a final softmax or expose raw logits.
+        self.classification_score_type = classification_score_type
 
     def __call__(self, text_input_list, **kwargs):
         text_array = np.array(text_input_list)

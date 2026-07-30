@@ -16,6 +16,9 @@ class SklearnModelWrapper(ModelWrapper):
     tokenizers.
     """
 
+    # ``predict_proba`` has a documented probability output contract.
+    classification_score_type = "probabilities"
+
     def __init__(self, model, tokenizer):
         self.model = model
         self.tokenizer = tokenizer

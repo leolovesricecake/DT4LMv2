@@ -1,0 +1,20 @@
+# Copy this template to DT4LM/configs/<name>.secert.yaml for local runs.
+# Files matching **.secert.yaml are ignored so credentials cannot enter git.
+backend: openai
+
+openai:
+  model: deepseek-v4-pro
+  base_url: https://api.deepseek.com
+  api_key: replace-me
+  timeout: 60
+  max_retries: 3
+  max_new_tokens: 32
+
+hf:
+  model: Qwen/Qwen2.5-7B-Instruct
+  revision: null
+  device: null
+  dtype: float16
+  batch_size: 4
+  max_retries: 3
+  max_new_tokens: 32

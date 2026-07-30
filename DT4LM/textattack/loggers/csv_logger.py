@@ -4,6 +4,7 @@ Attack Logs to CSV
 """
 
 import csv
+import json
 
 import pandas as pd
 
@@ -38,6 +39,24 @@ class CSVLogger(Logger):
             "ground_truth_output": result.original_result.ground_truth_output,
             "num_queries": result.num_queries,
             "result_type": result_type,
+            # Keep nested model/objective fields encoded rather than dropping
+            # them from the legacy flat CSV artifact.
+            "objective": getattr(result.perturbed_result, "objective_name", None),
+            "objective_score": json.dumps(
+                result.perturbed_result.score.to_serializable()
+                if hasattr(result.perturbed_result.score, "to_serializable")
+                else result.perturbed_result.score
+            ),
+            "new_model_output": json.dumps(
+                getattr(result.perturbed_result, "new_model_output", None)
+            ),
+            "old_model_output": json.dumps(
+                getattr(result.perturbed_result, "old_model_output", None)
+            ),
+            "nli": json.dumps(
+                result.perturbed_result.attacked_text.attack_attrs.get("nli")
+            ),
+            "nli_profile": json.dumps(getattr(result, "nli_profile", None)),
         }
         self.row_list.append(row)
         self.df = pd.DataFrame.from_records(self.row_list)

@@ -9,6 +9,7 @@ TextAttack allows users to provide their own dataset or load from HuggingFace.
 """
 
 import collections
+from pathlib import Path
 
 import datasets
 
@@ -111,14 +112,55 @@ class HuggingFaceDataset(Dataset):
     ):
         if isinstance(name_or_dataset, datasets.Dataset):
             self._dataset = name_or_dataset
+            self._name = None
+            self._subset = None
         else:
-            self._name = name_or_dataset
-            self._subset = subset
-            self._dataset = datasets.load_dataset(self._name, subset)[split]
-            subset_print_str = f", subset {_cb(subset)}" if subset else ""
-            textattack.shared.logger.info(
-                f"Loading {_cb('datasets')} dataset {_cb(self._name)}{subset_print_str}, split {_cb(split)}."
+            local_path = Path(name_or_dataset).expanduser()
+            explicitly_local = local_path.is_absolute() or str(
+                name_or_dataset
+            ).startswith((".", "outputs/"))
+            if explicitly_local and not local_path.exists():
+                raise FileNotFoundError(
+                    f"Local dataset does not exist: {local_path}. "
+                    "Run datasets/preprocess_dataset.py first."
+                )
+            self._name = str(
+                local_path.resolve() if local_path.exists() else name_or_dataset
             )
+            self._subset = subset
+            if local_path.exists():
+                # Preprocessing CLIs save DatasetDict objects locally so model
+                # training and attacks do not require a private Hub repository.
+                loaded = datasets.load_from_disk(str(local_path.resolve()))
+                if isinstance(loaded, datasets.DatasetDict):
+                    if split not in loaded:
+                        raise KeyError(
+                            f"Local dataset {local_path} has no split {split!r}."
+                        )
+                    self._dataset = loaded[split]
+                elif isinstance(loaded, datasets.Dataset):
+                    if split != "train":
+                        raise KeyError(
+                            "A single local Dataset can only provide train split."
+                        )
+                    self._dataset = loaded
+                else:
+                    raise TypeError(
+                        f"Unsupported local dataset object at {local_path}."
+                    )
+                textattack.shared.logger.info(
+                    f"Loading local {_cb('datasets')} dataset "
+                    f"{_cb(self._name)}, split {_cb(split)}."
+                )
+            else:
+                self._dataset = datasets.load_dataset(
+                    self._name, subset
+                )[split]
+                subset_print_str = f", subset {_cb(subset)}" if subset else ""
+                textattack.shared.logger.info(
+                    f"Loading {_cb('datasets')} dataset "
+                    f"{_cb(self._name)}{subset_print_str}, split {_cb(split)}."
+                )
         # Input/output column order, like (('premise', 'hypothesis'), 'label')
         # print("here ok!")
         (

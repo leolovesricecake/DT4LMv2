@@ -30,17 +30,33 @@ under ~/DT4LM directory to reconstruct the code environment.
 
 
 ## Datasets
-To obtain the fine-tuning datasets with the preprocessing steps mentioned in the paper, execute the .ipynb files in ./datasets folder. Specifically, ./datasets/NL-inference/rte.ipynb processes the [RTE Dataset](https://huggingface.co/datasets/nyu-mll/glue/viewer/rte), ./datasets/semantic-equivalence/mrpc.ipynb processes the [MRPC Dataset](https://huggingface.co/datasets/nyu-mll/glue/viewer/mrpc), ./datasets/sentiment-classification/sst2.ipynb processes the [SST-2 Dataset](https://huggingface.co/datasets/stanfordnlp/sst2), and ./datasets/sentiment-classification/mr.ipynb processes the [MR Dataset](https://huggingface.co/datasets/cornell-movie-review-data/rotten_tomatoes).
+The original fine-tuning notebooks are available as a local-output CLI for
+SST-2, RTE, MRPC, and MR:
 
-To obtain the adversarial training data, follow the instruction in `./datasets/adversarial-training/sample.ipynb` file to sample the training instances for differential inputs generation. Subsequently, follow the remaining instruction to create the adversarial training dataset with the generated differential inputs.
+```bash
+python datasets/preprocess_dataset.py sst2
+python datasets/preprocess_dataset.py rte
+```
+
+Outputs default to `outputs/datasets/<dataset>` and can be changed with
+`--output-dir`. TextAttack training and attack commands load these local
+`save_to_disk` directories directly. Run
+`python datasets/preprocess_dataset.py --help` for all source, revision, split,
+and optional Hub upload settings.
+
+The adversarial-training notebook is converted to the `sample` and `combine`
+subcommands in `datasets/prepare_adversarial_training.py`.
 
 ## Experiments
 ### Preparation (Fine-tuning)
 Example files to conduct fine-tuning is provided in `./experiments/finetune`. An example would be:
 ```bash
-   $ bash train_albertbasev1_sst2.sh
+   $ bash experiments/finetune/train_albertbasev1_sst2.sh
 ```
-This finetunes the ALBERT-base-v1 model on the SST-2 dataset, where the --dataset argument in the .sh file should be replaced by the processed dataset path. Note that, when changing the hyperparameters, please make sure that the two models within the same model pair still share the same set of hyperparameters, ensuring a fair comparison.
+This fine-tunes ALBERT-base-v1 on the default local SST-2 output. A custom
+dataset directory and model output directory can be passed as the first and
+second arguments. When changing hyperparameters, keep both models in a pair
+symmetric to ensure a fair comparison.
 
 For evaluating the model's performance on the test set, run:
 ```bash
@@ -77,6 +93,45 @@ There are four steps in adversarial training.
 
 ### RQ4: Ablation Study (additional results can be found in the `./additional_results/RQ4` folder)
 To conduct ablation study, replace the current goal function design with the naive goal function design in `textattack/goal_functions/classification/differential_classification.py`. Subsequently, follow the same instructions in RQ1 to conduct differential input generation and compare the results.
+
+## SemDT and LexiDT Improvements
+
+The first-round workflow uses one shared `pair` recipe with orthogonal objective
+and semantic-constraint switches. Dataset hyperparameters and individual
+experiment definitions live in separate YAML files:
+
+```text
+--differential-objective dynamic|static|lexi
+--semantic-constraint original|nli
+```
+
+Freeze the config-selected jointly-correct train/test manifests:
+
+```bash
+bash experiments/improvements/prepare_manifests.sh \
+  experiments/improvements/configs/sst2.yaml
+```
+
+Run one selected judge backend at a time:
+
+```bash
+bash experiments/improvements/calibrate_semdt.sh \
+  experiments/improvements/configs/sst2.yaml \
+  configs/openai.secert.yaml
+```
+
+Run exactly one experiment at a time:
+
+```bash
+bash experiments/improvements/run_first_round.sh \
+  experiments/improvements/configs/sst2.yaml \
+  experiments/improvements/configs/experiments/base.yaml
+```
+
+The complete Chinese guide, including model training, smoke-test
+hyperparameters, independent OpenAI/HF calibration, all experiment commands,
+trajectory audits, automatic metrics, and human evaluation, is
+[`../docs/DT4LM-改进实验完整指南.md`](../docs/DT4LM-改进实验完整指南.md).
 
 ## Acknowledgement
 The DT4LM framework is adapted from the [TextAttack](https://github.com/QData/TextAttack) library.

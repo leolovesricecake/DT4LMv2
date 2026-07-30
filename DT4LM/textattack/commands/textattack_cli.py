@@ -17,6 +17,7 @@ from textattack.commands.benchmark_recipe_command import BenchmarkRecipeCommand
 from textattack.commands.eval_model_command import EvalModelCommand
 from textattack.commands.list_things_command import ListThingsCommand
 from textattack.commands.peek_dataset_command import PeekDatasetCommand
+from textattack.commands.semdt_calibration_command import SemDTCalibrationCommand
 from textattack.commands.train_model_command import TrainModelCommand
 
 
@@ -37,6 +38,7 @@ def main():
     ListThingsCommand.register_subcommand(subparsers)
     TrainModelCommand.register_subcommand(subparsers)
     PeekDatasetCommand.register_subcommand(subparsers)
+    SemDTCalibrationCommand.register_subcommand(subparsers)
 
     # Let's go
     args = parser.parse_args()

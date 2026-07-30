@@ -204,6 +204,7 @@ class AttackArgs:
     num_workers_per_device: int = 1
     log_to_txt: str = None
     log_to_csv: str = None
+    log_to_jsonl: str = None
     log_summary_to_json: str = None
     csv_coloring_style: str = "file"
     log_to_visdom: dict = None
@@ -333,6 +334,14 @@ class AttackArgs:
             "If the last part of the path ends with `.csv` extension, the path is assumed to path for output file.",
         )
         parser.add_argument(
+            "--log-to-jsonl",
+            nargs="?",
+            default=default_obj.log_to_jsonl,
+            const="",
+            type=str,
+            help="Path for lossless per-sample JSONL attack records.",
+        )
+        parser.add_argument(
             "--log-summary-to-json",
             nargs="?",
             default=default_obj.log_summary_to_json,
@@ -434,6 +443,17 @@ class AttackArgs:
             )
             attack_log_manager.add_output_csv(csv_file_path, color_method)
 
+        if args.log_to_jsonl is not None:
+            if args.log_to_jsonl.lower().endswith(".jsonl"):
+                jsonl_file_path = args.log_to_jsonl
+            else:
+                jsonl_file_path = os.path.join(
+                    args.log_to_jsonl, f"{timestamp}-results.jsonl"
+                )
+            directory = os.path.dirname(jsonl_file_path) or "."
+            os.makedirs(directory, exist_ok=True)
+            attack_log_manager.add_output_jsonl(jsonl_file_path)
+
         # if '--log-summary-to-json' specified with arguments
         if args.log_summary_to_json is not None:
             if args.log_summary_to_json.lower().endswith(".json"):
@@ -517,6 +537,22 @@ class _CommandLineAttackArgs:
     base_recipe: str = "leap"
     lambda1: float = 0
     lambda2: float = 0
+    differential_objective: str = "dynamic"
+    semantic_constraint: str = "original"
+    semantic_threshold_file: str = None
+    candidate_log: str = None
+    nli_model_name_or_path: str = "FacebookAI/roberta-large-mnli"
+    nli_model_revision: str = None
+    nli_tokenizer_revision: str = None
+    nli_entailment_threshold: float = 0.90
+    nli_contradiction_threshold: float = 0.05
+    nli_device: str = None
+    nli_dtype: str = "float32"
+    nli_batch_size: int = 32
+    nli_max_length: int = 512
+    nli_truncation_strategy: str = "longest_first"
+    nli_audit_log: str = None
+    nli_profile_output: str = None
     # do_not_push: bool = False
 
     @classmethod
@@ -630,6 +666,81 @@ class _CommandLineAttackArgs:
             required=False,
             default=default_obj.lambda2,
             help='Goal Function Parameter.',
+        )
+        parser.add_argument(
+            "--differential-objective",
+            choices=("dynamic", "static", "lexi"),
+            default=default_obj.differential_objective,
+            help="Objective used by the differential classification goal.",
+        )
+        parser.add_argument(
+            "--semantic-constraint",
+            choices=("original", "nli"),
+            default=default_obj.semantic_constraint,
+            help="Optionally append the bidirectional NLI constraint.",
+        )
+        parser.add_argument(
+            "--semantic-threshold-file",
+            default=default_obj.semantic_threshold_file,
+            help="Calibrated threshold artifact for the selected dataset and judge.",
+        )
+        parser.add_argument(
+            "--candidate-log",
+            default=default_obj.candidate_log,
+            help="JSONL path for candidates observed after query-budget truncation.",
+        )
+        parser.add_argument(
+            "--nli-model-name-or-path",
+            default=default_obj.nli_model_name_or_path,
+        )
+        parser.add_argument(
+            "--nli-model-revision",
+            default=default_obj.nli_model_revision,
+        )
+        parser.add_argument(
+            "--nli-tokenizer-revision",
+            default=default_obj.nli_tokenizer_revision,
+        )
+        parser.add_argument(
+            "--nli-entailment-threshold",
+            type=float,
+            default=default_obj.nli_entailment_threshold,
+        )
+        parser.add_argument(
+            "--nli-contradiction-threshold",
+            type=float,
+            default=default_obj.nli_contradiction_threshold,
+        )
+        parser.add_argument("--nli-device", default=default_obj.nli_device)
+        parser.add_argument(
+            "--nli-dtype",
+            choices=("float32", "float16", "bfloat16"),
+            default=default_obj.nli_dtype,
+        )
+        parser.add_argument(
+            "--nli-batch-size",
+            type=int,
+            default=default_obj.nli_batch_size,
+        )
+        parser.add_argument(
+            "--nli-max-length",
+            type=int,
+            default=default_obj.nli_max_length,
+        )
+        parser.add_argument(
+            "--nli-truncation-strategy",
+            choices=("longest_first", "only_first", "only_second"),
+            default=default_obj.nli_truncation_strategy,
+        )
+        parser.add_argument(
+            "--nli-audit-log",
+            default=default_obj.nli_audit_log,
+            help="Append-only JSONL trace of candidates checked by NLI.",
+        )
+        parser.add_argument(
+            "--nli-profile-output",
+            default=default_obj.nli_profile_output,
+            help="JSON path for aggregate NLI runtime and cache counters.",
         )
         # parser.add_argument(
         #     "--do-not-push",
