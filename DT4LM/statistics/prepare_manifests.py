@@ -6,16 +6,34 @@ import hashlib
 import json
 from pathlib import Path
 import random
+import sys
 
 import yaml
+
+
+# Direct script execution adds statistics/ rather than the repository root to
+# sys.path, so expose the lightweight shared artifact rules explicitly.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from dt4lm_artifacts import (  # noqa: E402
+    require_model_pair_id,
+    resolve_model_id,
+    resolve_path,
+    validate_artifact_namespaces,
+)
 
 
 def _load_config(path):
     with open(path, encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
+    if not isinstance(config, dict):
+        raise ValueError("Experiment config must contain a YAML mapping.")
     for section in ("dataset", "models", "manifests", "sampling"):
         if section not in config:
             raise ValueError(f"Experiment config is missing {section!r}.")
+    validate_artifact_namespaces(config, PROJECT_ROOT)
     return config
 
 
@@ -27,13 +45,6 @@ def _model_revision(model, configured):
         or configured
         or getattr(model.config, "_name_or_path", None)
     )
-
-
-def _resolve_checkpoint(project_root, configured):
-    """Resolve tracked local checkpoint paths while preserving Hub model IDs."""
-
-    candidate = project_root / configured
-    return str(candidate) if candidate.exists() else configured
 
 
 def _predict(dataset, model_id, revision, columns, label_column, batch_size, device):
@@ -73,10 +84,12 @@ def _manifest(
     dataset_id,
     fingerprint,
     split,
+    model_pair_id,
     old_model_id,
     new_model_id,
     old_revision,
     new_revision,
+    generation_config_sha256,
     seed,
     population_size,
     eligible,
@@ -88,10 +101,12 @@ def _manifest(
         "dataset_id": dataset_id,
         "dataset_revision_or_fingerprint": fingerprint,
         "split": split,
+        "model_pair_id": model_pair_id,
         "old_model_id": old_model_id,
         "new_model_id": new_model_id,
         "old_model_revision": old_revision,
         "new_model_revision": new_revision,
+        "generation_config_sha256": generation_config_sha256,
         "seed": seed,
         "test_split_size": population_size,
         "eligible_indices": list(eligible),
@@ -145,8 +160,68 @@ def _select_indices(eligible, policy, seed, role):
 def _resolve_output(project_root, configured):
     """Resolve one configured manifest artifact path from the DT4LM root."""
 
-    path = Path(configured)
-    return path if path.is_absolute() else project_root / path
+    return resolve_path(project_root, configured)
+
+
+def _generation_settings(config, device, batch_size):
+    """Select every setting that can change manifest membership or ordering."""
+
+    return {
+        "seed": int(config.get("seed", 765)),
+        "dataset": config["dataset"],
+        "models": config["models"],
+        "sampling": config["sampling"],
+        "device": device,
+        "batch_size": batch_size,
+    }
+
+
+def _sha256_json(value):
+    """Hash structured generation settings independently of YAML formatting."""
+
+    encoded = json.dumps(
+        value, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _write_frozen_payloads(payloads):
+    """Create immutable JSON artifacts, allowing only structural reuse."""
+
+    # Validate every existing artifact before creating any missing sibling, so
+    # one conflicting file cannot leave a partially updated manifest set.
+    for path, payload in payloads:
+        if not path.exists():
+            continue
+        with open(path, encoding="utf-8") as handle:
+            existing = json.load(handle)
+        if existing != payload:
+            raise FileExistsError(
+                f"Refusing to overwrite frozen artifact {path}: its model pair, "
+                "revision, dataset fingerprint, sampling, or generation settings "
+                "differ. Use a new models.id/output namespace."
+            )
+
+    for path, payload in payloads:
+        if path.exists():
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "x", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=True, indent=2, sort_keys=True)
+
+
+def _validate_existing_generation(metadata_path, generation_config_sha256):
+    """Reject changed generation settings before loading either checkpoint."""
+
+    if not metadata_path.exists():
+        return
+    with open(metadata_path, encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    if metadata.get("generation_config_sha256") != generation_config_sha256:
+        raise FileExistsError(
+            f"Refusing to reuse frozen manifest metadata {metadata_path}: the "
+            "generation settings changed. Use a new models.id/output namespace."
+        )
 
 
 def _load_dataset_collection(dataset_config, project_root):
@@ -188,16 +263,22 @@ def main():
     import torch
     dataset_config = config["dataset"]
     model_config = config["models"]
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = PROJECT_ROOT
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    model_pair_id = require_model_pair_id(config)
+    seed = int(config.get("seed", 765))
+    generation_settings = _generation_settings(config, device, args.batch_size)
+    generation_config_sha256 = _sha256_json(generation_settings)
+    metadata_path = _resolve_output(project_root, config["manifests"]["metadata"])
+    _validate_existing_generation(metadata_path, generation_config_sha256)
+
     loaded = _load_dataset_collection(dataset_config, project_root)
     columns = list(dataset_config["text_columns"])
     label_column = dataset_config.get("label_column", "label")
-    old_id = _resolve_checkpoint(project_root, model_config["old"])
-    new_id = _resolve_checkpoint(project_root, model_config["new"])
+    old_id = resolve_model_id(project_root, model_config["old"])
+    new_id = resolve_model_id(project_root, model_config["new"])
     old_configured_revision = model_config.get("old_revision")
     new_configured_revision = model_config.get("new_revision")
-    seed = int(config.get("seed", 765))
     manifests = {}
 
     for role, split_key, sampling_key in (
@@ -250,10 +331,12 @@ def main():
             dataset_id=dataset_config["id"],
             fingerprint=fingerprint,
             split=split,
+            model_pair_id=model_pair_id,
             old_model_id=old_id,
             new_model_id=new_id,
             old_revision=_model_revision(old_model, old_configured_revision),
             new_revision=_model_revision(new_model, new_configured_revision),
+            generation_config_sha256=generation_config_sha256,
             seed=seed,
             population_size=len(dataset),
             eligible=eligible,
@@ -264,37 +347,24 @@ def main():
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
 
-    for role, manifest in manifests.items():
-        output_path = _resolve_output(project_root, config["manifests"][role])
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as handle:
-            json.dump(manifest, handle, ensure_ascii=True, indent=2, sort_keys=True)
-    with open(args.config, "rb") as handle:
-        config_hash = hashlib.sha256(handle.read()).hexdigest()
-    metadata_path = _resolve_output(
-        project_root,
-        config["manifests"].get(
-            "metadata",
-            str(Path(config["manifests"]["test"]).parent / "manifest_metadata.json"),
-        ),
-    )
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(metadata_path, "w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "config_sha256": config_hash,
-                "device": device,
-                "sampling": config["sampling"],
-                "selected_counts": {
-                    role: len(manifest["selected_indices"])
-                    for role, manifest in manifests.items()
-                },
-            },
-            handle,
-            ensure_ascii=True,
-            indent=2,
-            sort_keys=True,
+    metadata = {
+        "model_pair_id": model_pair_id,
+        "generation_config_sha256": generation_config_sha256,
+        "generation_settings": generation_settings,
+        "selected_counts": {
+            role: len(manifest["selected_indices"])
+            for role, manifest in manifests.items()
+        },
+    }
+    payloads = [
+        (
+            _resolve_output(project_root, config["manifests"][role]),
+            manifest,
         )
+        for role, manifest in manifests.items()
+    ]
+    payloads.append((metadata_path, metadata))
+    _write_frozen_payloads(payloads)
 
 
 if __name__ == "__main__":

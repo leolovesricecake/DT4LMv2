@@ -10,11 +10,24 @@ import sys
 import yaml
 
 
+# Direct script execution exposes only experiments/improvements on sys.path.
+# Add the DT4LM root so calibration shares the formal artifact identity rules.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from dt4lm_artifacts import (  # noqa: E402
+    resolve_model_id,
+    resolve_path,
+    validate_artifact_namespaces,
+    validate_manifest_identity,
+)
+
+
 def _resolve(project_root, value):
     """Interpret pipeline paths relative to the checked-out DT4LM root."""
 
-    path = Path(value)
-    return path if path.is_absolute() else project_root / path
+    return resolve_path(project_root, value)
 
 
 def _load_yaml(path, label):
@@ -35,13 +48,19 @@ def _require(mapping, key, context):
     return mapping[key]
 
 
-def _validate_config(config):
+def _validate_config(config, project_root=PROJECT_ROOT):
     """Validate all hyperparameters consumed by the formal calibration path."""
 
     for section in ("dataset", "models", "manifests", "nli", "calibration"):
         if not isinstance(config.get(section), dict):
             raise ValueError(f"Dataset configuration requires section {section!r}.")
     calibration = config["calibration"]
+    for key in ("id", "old", "new"):
+        _require(config["models"], key, "models")
+    for key in ("id", "calibration_split", "test_split"):
+        _require(config["dataset"], key, "dataset")
+    for key in ("train", "test", "metadata"):
+        _require(config["manifests"], key, "manifests")
     for key in (
         "output_root",
         "candidate_collection",
@@ -102,6 +121,7 @@ def _validate_config(config):
         _require(config["nli"], key, "nli")
     for key in ("seed", "query_budget"):
         _require(config, key, "Dataset configuration")
+    validate_artifact_namespaces(config, project_root)
 
 
 def _judge_identity(judge_config):
@@ -138,6 +158,45 @@ def _jsonl_ids(path):
             if line.strip():
                 result.add(json.loads(line)["candidate_id"])
     return result
+
+
+def _verify_candidate_scope(path, config, project_root=PROJECT_ROOT):
+    """Reject resumable candidate files copied from another model pair."""
+
+    expected_pair = str(config["models"]["id"])
+    expected_dataset = str(config["dataset"]["id"])
+    expected_models = {
+        "old_model_id": resolve_model_id(project_root, config["models"]["old"]),
+        "new_model_id": resolve_model_id(project_root, config["models"]["new"]),
+    }
+    observed_pairs = set()
+    observed_datasets = set()
+    observed_models = {key: set() for key in expected_models}
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            observed_pairs.add((row.get("metadata") or {}).get("model_pair_id"))
+            observed_datasets.add(row.get("dataset"))
+            for key in expected_models:
+                observed_models[key].add((row.get("metadata") or {}).get(key))
+    model_mismatches = {
+        key: values
+        for key, values in observed_models.items()
+        if values != {expected_models[key]}
+    }
+    if (
+        observed_pairs != {expected_pair}
+        or observed_datasets != {expected_dataset}
+        or model_mismatches
+    ):
+        raise ValueError(
+            f"Candidates at {path} belong to datasets {observed_datasets!r} and "
+            f"model pairs {observed_pairs!r}, with model mismatches "
+            f"{model_mismatches!r}; expected {expected_dataset!r}/"
+            f"{expected_pair!r}/{expected_models!r}. Use a new calibration root."
+        )
 
 
 def _verify_annotation_identity(path, backend, model):
@@ -195,9 +254,6 @@ def _annotate_if_needed(
 def _collect_candidates(config, project_root, raw_path):
     """Collect Base candidates using config-defined objective and constraints."""
 
-    if raw_path.exists():
-        return
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
     dataset = config["dataset"]
     models = config["models"]
     collection = config["calibration"]["candidate_collection"]
@@ -207,6 +263,15 @@ def _collect_candidates(config, project_root, raw_path):
             f"Calibration manifest does not exist: {manifest}. "
             "Run prepare_manifests.sh first."
         )
+    validate_manifest_identity(
+        manifest,
+        config,
+        dataset["calibration_split"],
+        project_root,
+    )
+    if raw_path.exists():
+        return
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
         "-m",
@@ -227,9 +292,9 @@ def _collect_candidates(config, project_root, raw_path):
         "--random-seed",
         str(config["seed"]),
         "--model",
-        str(_resolve(project_root, models["new"])),
+        resolve_model_id(project_root, models["new"]),
         "--second-model",
-        str(_resolve(project_root, models["old"])),
+        resolve_model_id(project_root, models["old"]),
         "--dataset-from-huggingface",
         str(dataset["textattack_spec"]),
         "--dataset-split",
@@ -280,6 +345,7 @@ def _prepare_shared_candidates(config, project_root, calibration_root):
     split_dir = calibration_root / "split"
     calibration = config["calibration"]
     _collect_candidates(config, project_root, raw_path)
+    _verify_candidate_scope(raw_path, config)
 
     nli = config["nli"]
     if not scored_path.exists():
@@ -314,6 +380,7 @@ def _prepare_shared_candidates(config, project_root, calibration_root):
         if nli.get("device"):
             arguments.extend(["--nli-device", str(nli["device"])])
         _run(project_root, *arguments)
+    _verify_candidate_scope(scored_path, config)
 
     split_manifest = split_dir / "split_manifest.json"
     if not split_manifest.exists():
@@ -333,10 +400,14 @@ def _prepare_shared_candidates(config, project_root, calibration_root):
             str(config["seed"]),
         )
     _verify_frozen_split(split_manifest, calibration, config["seed"])
+    _verify_candidate_scope(split_dir / "search.jsonl", config)
+    _verify_candidate_scope(split_dir / "validation.jsonl", config)
     return scored_path, split_dir
 
 
-def _verify_threshold_identity(path, backend, model, threshold_search):
+def _verify_threshold_identity(
+    path, backend, model, threshold_search, dataset_id, model_pair_id
+):
     """Reject a frozen threshold produced by another judge or search setup."""
 
     if not path.exists():
@@ -349,6 +420,8 @@ def _verify_threshold_identity(path, backend, model, threshold_search):
         "method": artifact.get("threshold_search_method", "grid"),
         "step": artifact.get("threshold_step", 0.01),
         "min_precision": artifact.get("min_precision"),
+        "dataset": artifact.get("dataset"),
+        "model_pair_id": artifact.get("model_pair_id"),
     }
     expected = {
         "backend": backend,
@@ -356,6 +429,8 @@ def _verify_threshold_identity(path, backend, model, threshold_search):
         "method": threshold_search["method"],
         "step": threshold_search["step"],
         "min_precision": threshold_search["min_precision"],
+        "dataset": dataset_id,
+        "model_pair_id": model_pair_id,
     }
     if actual != expected:
         raise ValueError(
@@ -394,7 +469,14 @@ def _calibrate_backend(
 
     threshold = backend_dir / "threshold.json"
     report = backend_dir / "validation_report.json"
-    _verify_threshold_identity(threshold, backend, model, threshold_search)
+    _verify_threshold_identity(
+        threshold,
+        backend,
+        model,
+        threshold_search,
+        config["dataset"]["id"],
+        config["models"]["id"],
+    )
     if not threshold.exists() or not report.exists():
         _run(
             project_root,
@@ -416,6 +498,8 @@ def _calibrate_backend(
             str(report),
             "--dataset",
             str(config["dataset"]["id"]),
+            "--model-pair-id",
+            str(config["models"]["id"]),
             "--threshold-search-method",
             str(threshold_search["method"]),
             "--threshold-step",
@@ -493,6 +577,17 @@ def _audit_trajectory(
 ):
     """Audit one explicitly selected formal run without retuning thresholds."""
 
+    run_manifest = run_dir / "sample_manifest.json"
+    if not run_manifest.is_file():
+        raise FileNotFoundError(
+            f"Selected trajectory run has no sample manifest: {run_manifest}."
+        )
+    validate_manifest_identity(
+        run_manifest,
+        config,
+        config["dataset"]["test_split"],
+        project_root,
+    )
     trajectory = run_dir / "nli_candidates.jsonl"
     if not trajectory.exists():
         raise FileNotFoundError(
@@ -566,7 +661,7 @@ def main():
     )
     args = parser.parse_args()
 
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = PROJECT_ROOT
     config = _load_yaml(Path(args.dataset_config).resolve(), "Dataset configuration")
     _validate_config(config)
     judge_config_path = _resolve(project_root, args.judge_config)

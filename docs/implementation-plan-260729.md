@@ -121,7 +121,8 @@ Levenshtein 距离。
 - 初始输入查询计入预算；
 - 同一批候选的批处理不改变逻辑查询数；
 - NLI 推理不计入受测模型的查询预算；
-- 同一数据集的所有方法使用同一 manifest 和相同的 \(N_D\)。
+- 同一数据集、同一有序模型对的所有方法使用同一 manifest 和相同的
+  \(N_D\)；不同模型对不得共用 manifest。
 
 定义：
 
@@ -683,8 +684,12 @@ DT4LM/configs/<judge_config_name>.secert.yaml
 dataset_id
 dataset_revision_or_fingerprint
 split
+model_pair_id
 old_model_id
 new_model_id
+old_model_revision
+new_model_revision
+generation_config_sha256
 seed
 test_split_size
 eligible_count
@@ -700,6 +705,10 @@ selected_indices
 \(N_D\)，不得从配置常量推断。
 
 训练集标定样本使用独立 manifest，不能与测试 manifest 混用。
+模型对在数据集 YAML 的 `models.id` 中声明。manifest、标定与正式运行产物
+分别写入 `<dataset>/<models.id>` 命名空间。已有冻结 manifest 仅在内容
+完全一致时可复用；模型、revision、数据指纹、抽样或生成参数变化时必须
+使用新的 `models.id` 和产物目录。
 
 ### 7.2 模型微调
 
@@ -725,7 +734,7 @@ split 决定，并同时应用于 v1/v2，不能根据差分测试结果调参�
 所有运行写入已被 git 忽略的：
 
 ```text
-DT4LM/outputs/dt4lm-improvements/<run_id>/
+DT4LM/outputs/dt4lm-improvements/runs/<dataset>/<models.id>/<experiment>/
 ```
 
 目录至少包含：
@@ -942,6 +951,7 @@ Combined 只验证两项改动能共同运行，并报告全部指标，不用�
 - `DT4LM/experiments/improvements/configs/rte.yaml`
 - `DT4LM/experiments/improvements/configs/experiments/*.yaml`
 - `DT4LM/experiments/improvements/prepare_manifests.sh`
+- `DT4LM/dt4lm_artifacts.py`
 - `DT4LM/experiments/improvements/calibrate_semdt.sh`
 - `DT4LM/experiments/improvements/run_first_round.sh`
 - `DT4LM/statistics/evaluate_improvements.py`
@@ -1029,8 +1039,11 @@ NLI：
 - 验证 LexiDT 不经过 NumPy 标量排序；
 - 验证 dynamic/static/lexi 只切换 comparator，不切换搜索状态机；
 - 验证模型和 NLI batch 不改变逻辑查询数；
-- 验证 manifest 在五种配置中产生完全相同的数据顺序；
-- 验证 SST-2 manifest 固定 500 条、RTE manifest 纳入全部 eligible 样本；
+- 验证同一数据集和模型对的五种配置使用完全相同的 manifest 顺序；
+- 验证 test manifest 按 `sampling.test` 执行，train manifest 的 500 条上限由
+  `sampling.calibration_originals.size` 控制；
+- 验证不同 `models.id` 的 manifest、标定和 run 路径隔离，错误模型对在
+  发起查询前被拒绝，冻结 manifest 不可被异构配置覆盖；
 - 验证完整结果 schema 可被统计脚本读取。
 
 网络相关测试全部 mock。另设手工 smoke test，分别加载
@@ -1095,7 +1108,7 @@ NLI：
 ### 阶段 5：首轮实验
 
 1. 完成 SST-2/RTE ALBERT v1/v2 微调和 clean accuracy 检查。
-2. 生成并冻结 train/test manifests。
+2. 按 `<dataset>/<models.id>` 命名空间生成并冻结 train/test manifests。
 3. 分别用 OpenAI 和 HF 后端标定阈值。
 4. 按相同 manifest 运行 Base、Static、LexiDT。
 5. 独立运行 SemDT-manual、SemDT-openai 和 SemDT-hf。
@@ -1132,8 +1145,8 @@ NLI：
 
 研究结论完成需要：
 
-- SST-2 有固定 500 条合格测试样本，RTE 使用冻结 manifest 中的全部合格
-  测试样本；
+- SST-2 和 RTE 的正式测试规模均由冻结 manifest 与 `sampling.test` 决定，
+  训练标定原始样本上限由配置控制；
 - 每个方法使用相同 1000 查询预算；
 - SemDT 同时具有 manual、OpenAI 和本地 HF 三个独立阈值运行结果；
 - OpenAI 和 HF 运行分别完成冻结阈值后的实际轨迹分布审计；

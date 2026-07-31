@@ -128,7 +128,22 @@ bash experiments/finetune/train_albertbasev1_sst2.sh \
 `outputs/datasets/sst2`、`outputs/datasets/rte` 及四个默认模型目录。
 
 若已有 checkpoint，可跳过训练，只需把数据集 YAML 中 `models.old` 和
-`models.new` 改成实际路径。两个模型必须使用相同标签空间和标签映射。
+`models.new` 改成实际路径，并为这个有序模型对设置稳定的
+`models.id`：
+
+```yaml
+models:
+  id: albertbasev1-albertbasev2
+  old: outputs/albertbasev1_sst2/best_model
+  new: outputs/albertbasev2_sst2/best_model
+  old_revision: null
+  new_revision: null
+```
+
+`models.id` 只允许字母、数字、`.`、`_` 和 `-`，用于隔离 manifest、
+标定与正式运行产物。更换任一 checkpoint 或 revision 时必须使用新
+ID，不要复用原模型对的目录。两个模型必须使用相同标签空间和
+标签映射。
 
 ### 3.3 对抗训练 notebook
 
@@ -216,14 +231,20 @@ bash experiments/improvements/prepare_manifests.sh \
 检查以下产物：
 
 ```text
-outputs/dt4lm-improvements/manifests/<dataset>/train_manifest.json
-outputs/dt4lm-improvements/manifests/<dataset>/test_manifest.json
-outputs/dt4lm-improvements/manifests/<dataset>/manifest_metadata.json
+outputs/dt4lm-improvements/manifests/<dataset>/<models.id>/train_manifest.json
+outputs/dt4lm-improvements/manifests/<dataset>/<models.id>/test_manifest.json
+outputs/dt4lm-improvements/manifests/<dataset>/<models.id>/manifest_metadata.json
 ```
 
-`manifest_metadata.json` 会记录配置哈希、采样策略和实际数量。所有实验必须读取
-同一 test manifest；GSR、Success@B 和人工评估均以其中 `sample_count`
-为分母。
+配置加载时会强制检查三个路径的目录末尾为
+`<dataset>/<models.id>`。
+
+`manifest_metadata.json` 会记录 `models.id`、生成配置哈希、完整生成参数和
+实际数量；manifest 自身还记录新旧模型 ID/revision 与数据指纹。
+已有产物只有在内容完全一致时才会被复用；任一身份或生成参数变化都会
+拒绝覆盖，此时应修改 `models.id` 及对应路径。同一数据集和模型对的
+所有方法必须读取同一 test manifest；GSR、Success@B 和人工评估均以
+其中 `sample_count` 为分母。
 
 ## 6. 配置一个 Judge 后端
 
@@ -283,10 +304,10 @@ bash experiments/improvements/calibrate_semdt.sh \
 关键产物：
 
 ```text
-outputs/dt4lm-improvements/calibration/<dataset>/split/split_manifest.json
-outputs/dt4lm-improvements/calibration/<dataset>/<backend>/threshold.json
-outputs/dt4lm-improvements/calibration/<dataset>/<backend>/validation_report.json
-outputs/dt4lm-improvements/calibration/<dataset>/<backend>/supplemental_report.json
+outputs/dt4lm-improvements/calibration/<dataset>/<models.id>/split/split_manifest.json
+outputs/dt4lm-improvements/calibration/<dataset>/<models.id>/<backend>/threshold.json
+outputs/dt4lm-improvements/calibration/<dataset>/<models.id>/<backend>/validation_report.json
+outputs/dt4lm-improvements/calibration/<dataset>/<models.id>/<backend>/supplemental_report.json
 ```
 
 标注文件采用追加式写入，可在 API 中断后用同一命令恢复。已完成的候选 ID
@@ -373,14 +394,14 @@ SemDT 正式运行完成后，用相同 judge 后端追加一次冻结阈值审�
 bash experiments/improvements/calibrate_semdt.sh \
   experiments/improvements/configs/sst2.yaml \
   configs/openai.secert.yaml \
-  outputs/dt4lm-improvements/sst2-semdt-openai
+  outputs/dt4lm-improvements/runs/sst2/albertbasev1-albertbasev2/semdt-openai
 ```
 
 结果写入：
 
 ```text
-outputs/dt4lm-improvements/calibration/sst2/openai/trajectory_audits/
-  sst2-semdt-openai/report.json
+outputs/dt4lm-improvements/calibration/sst2/albertbasev1-albertbasev2/
+  openai/trajectory_audits/semdt-openai/report.json
 ```
 
 该步骤按 YAML 中 `trajectory_sample_size` 分层抽样，只评估冻结阈值在实际
@@ -391,9 +412,9 @@ SemDT 搜索轨迹上的 precision、recall、接受率和 NLI 分数偏移，�
 ```bash
 python -m textattack semdt-calibrate \
   --stage judge-agreement \
-  --left-labels outputs/dt4lm-improvements/calibration/sst2/openai/validation_labels.jsonl \
-  --right-labels outputs/dt4lm-improvements/calibration/sst2/hf/validation_labels.jsonl \
-  --output outputs/dt4lm-improvements/calibration/sst2/judge_agreement.json
+  --left-labels outputs/dt4lm-improvements/calibration/sst2/albertbasev1-albertbasev2/openai/validation_labels.jsonl \
+  --right-labels outputs/dt4lm-improvements/calibration/sst2/albertbasev1-albertbasev2/hf/validation_labels.jsonl \
+  --output outputs/dt4lm-improvements/calibration/sst2/albertbasev1-albertbasev2/judge_agreement.json
 ```
 
 一致率只用于报告，不能混合两个后端的标签或阈值。
@@ -403,7 +424,7 @@ python -m textattack semdt-calibrate \
 每次正式运行结束后会自动生成：
 
 ```text
-outputs/dt4lm-improvements/<dataset>-<experiment>/
+outputs/dt4lm-improvements/runs/<dataset>/<models.id>/<experiment>/
   config.yaml
   environment.json
   sample_manifest.json
@@ -444,13 +465,13 @@ QPS 使用已经确认的论文口径：
 Base 独有成功和 SemDT 独有成功三层的实际占比分层抽取 100 个原始样本：
 
 ```bash
-mkdir -p outputs/dt4lm-improvements/human/sst2
+mkdir -p outputs/dt4lm-improvements/human/sst2/albertbasev1-albertbasev2
 python statistics/sample_human_evaluation.py \
-  --base-results outputs/dt4lm-improvements/sst2-base/results.jsonl \
-  --semdt-results outputs/dt4lm-improvements/sst2-semdt-openai/results.jsonl \
-  --manifest outputs/dt4lm-improvements/sst2-base/sample_manifest.json \
-  --output outputs/dt4lm-improvements/human/sst2/reviews.jsonl \
-  --key-output outputs/dt4lm-improvements/human/sst2/method_key.json \
+  --base-results outputs/dt4lm-improvements/runs/sst2/albertbasev1-albertbasev2/base/results.jsonl \
+  --semdt-results outputs/dt4lm-improvements/runs/sst2/albertbasev1-albertbasev2/semdt-openai/results.jsonl \
+  --manifest outputs/dt4lm-improvements/runs/sst2/albertbasev1-albertbasev2/base/sample_manifest.json \
+  --output outputs/dt4lm-improvements/human/sst2/albertbasev1-albertbasev2/reviews.jsonl \
+  --key-output outputs/dt4lm-improvements/human/sst2/albertbasev1-albertbasev2/method_key.json \
   --sample-size 100 \
   --seed 765
 ```
@@ -463,13 +484,13 @@ python statistics/sample_human_evaluation.py \
 
 ```bash
 python statistics/analyze_human_evaluation.py \
-  --reviews outputs/dt4lm-improvements/human/sst2/reviews.jsonl \
-  --key outputs/dt4lm-improvements/human/sst2/method_key.json \
-  --output outputs/dt4lm-improvements/human/sst2/analysis.json \
+  --reviews outputs/dt4lm-improvements/human/sst2/albertbasev1-albertbasev2/reviews.jsonl \
+  --key outputs/dt4lm-improvements/human/sst2/albertbasev1-albertbasev2/method_key.json \
+  --output outputs/dt4lm-improvements/human/sst2/albertbasev1-albertbasev2/analysis.json \
   --bootstrap-samples 10000 \
   --seed 765 \
-  --base-summary outputs/dt4lm-improvements/sst2-base/summary.json \
-  --semdt-summary outputs/dt4lm-improvements/sst2-semdt-openai/summary.json
+  --base-summary outputs/dt4lm-improvements/runs/sst2/albertbasev1-albertbasev2/base/summary.json \
+  --semdt-summary outputs/dt4lm-improvements/runs/sst2/albertbasev1-albertbasev2/semdt-openai/summary.json
 ```
 
 RTE 使用独立目录重复相同步骤。结果按各层实际总体占比估计语义保持率和
@@ -481,7 +502,8 @@ ValidGSR，并以原始样本为单位执行分层 bootstrap，给出 95% 置信
 正式汇总前逐项确认：
 
 - 新旧模型 checkpoint、类别数和标签映射一致；
-- manifest 元数据中的采样策略、配置哈希和实际数量正确；
+- `models.id` 与实际有序模型对一致，三类产物均在对应命名空间；
+- manifest 元数据中的生成参数、配置哈希和实际数量正确；
 - 所有方法使用同一 test manifest；
 - 每个实验目录只对应一个实验 YAML；
 - OpenAI 与 HF 标签和阈值目录彼此独立；

@@ -15,8 +15,10 @@ class SampleManifest:
     dataset_id: str
     dataset_revision_or_fingerprint: str
     split: str
+    model_pair_id: str
     old_model_id: str
     new_model_id: str
+    generation_config_sha256: str
     seed: int
     test_split_size: int
     eligible_indices: List[int]
@@ -35,6 +37,12 @@ class SampleManifest:
     def validate(self) -> None:
         """Reject malformed manifests before they can alter metric denominators."""
 
+        if not self.dataset_id or not self.split or not self.model_pair_id:
+            raise ValueError(
+                "Manifest dataset_id, split, and model_pair_id must be non-empty."
+            )
+        if not self.generation_config_sha256:
+            raise ValueError("Manifest generation_config_sha256 must be non-empty.")
         if self.test_split_size <= 0:
             raise ValueError("test_split_size must be positive.")
         if not self.eligible_indices:
@@ -140,6 +148,20 @@ class ManifestDatasetView(Dataset):
 
     def __init__(self, dataset: Dataset, manifest: SampleManifest):
         manifest.validate()
+        source = getattr(dataset, "_dataset", None)
+        actual_fingerprint = getattr(source, "_fingerprint", None)
+        expected_fingerprint = manifest.dataset_revision_or_fingerprint
+        # Hugging Face fingerprints bind indices to exact dataset content. A
+        # custom Dataset without fingerprint metadata keeps legacy behavior.
+        if (
+            expected_fingerprint
+            and actual_fingerprint
+            and expected_fingerprint != actual_fingerprint
+        ):
+            raise ValueError(
+                "Loaded dataset fingerprint does not match the frozen manifest: "
+                f"{actual_fingerprint!r} != {expected_fingerprint!r}."
+            )
         if any(index >= len(dataset) for index in manifest.selected_indices):
             raise ValueError("Manifest selects an index outside the loaded dataset.")
         self._source_dataset = dataset

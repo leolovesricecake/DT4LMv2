@@ -83,6 +83,10 @@ evaluation = _load(
     "dt4lm_statistics.evaluate_improvements",
     "statistics/evaluate_improvements.py",
 )
+artifacts = _load(
+    "dt4lm_artifacts",
+    "dt4lm_artifacts.py",
+)
 
 # BidirectionalNLI's aggregation can be tested without tensor inference. The
 # lightweight stubs let the module load while each score is supplied directly.
@@ -337,6 +341,37 @@ def test_manifest_selection_is_explicit_and_dataset_agnostic():
     ) == [0]
 
 
+def test_manifest_view_rejects_a_changed_dataset_fingerprint():
+    manifest = manifests.SampleManifest(
+        dataset_id="sst2",
+        dataset_revision_or_fingerprint="frozen-fingerprint",
+        split="test",
+        model_pair_id="old-new",
+        old_model_id="old",
+        new_model_id="new",
+        generation_config_sha256="config-hash",
+        seed=765,
+        test_split_size=2,
+        eligible_indices=[0, 1],
+        selected_indices=[0, 1],
+    )
+
+    class SourceDataset:
+        """Minimal dataset carrying the Hugging Face fingerprint contract."""
+
+        _dataset = types.SimpleNamespace(_fingerprint="changed-fingerprint")
+        input_columns = ("sentence",)
+        label_names = ["negative", "positive"]
+        label_map = None
+        output_scale_factor = None
+
+        def __len__(self):
+            return 2
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        manifests.ManifestDatasetView(SourceDataset(), manifest)
+
+
 def test_manifest_preparation_uses_configured_hyperparameter():
     policy = {"strategy": "random_up_to", "size": 4}
     selected = manifest_preparation._select_indices(
@@ -388,6 +423,9 @@ def test_dataset_configs_expose_sampling_and_threshold_search():
     assert rte["dataset"]["text_columns"] == ["premise", "hypothesis"]
     for config in (sst2, rte):
         semdt_calibrator._validate_config(config)
+        assert config["models"]["id"] == "albertbasev1-albertbasev2"
+        namespace = Path(config["manifests"]["test"]).parent.parts[-2:]
+        assert namespace == (config["dataset"]["id"], config["models"]["id"])
         assert config["calibration"]["threshold_search"] == {
             "method": "grid",
             "step": 0.01,
@@ -544,12 +582,24 @@ def test_attack_command_uses_each_experiment_file_instead_of_a_matrix(tmp_path):
     config = yaml.safe_load(
         (config_dir / "sst2.yaml").read_text(encoding="utf-8")
     )
-    config["calibration"]["output_root"] = str(tmp_path / "calibration")
+    calibration_root = (
+        tmp_path
+        / "calibration"
+        / config["dataset"]["id"]
+        / config["models"]["id"]
+    )
+    config["calibration"]["output_root"] = str(calibration_root)
     for backend in ("openai", "hf"):
-        threshold = tmp_path / "calibration" / backend / "threshold.json"
+        threshold = calibration_root / backend / "threshold.json"
         threshold.parent.mkdir(parents=True, exist_ok=True)
         threshold.write_text(
-            json.dumps({"judge_backend": backend}),
+            json.dumps(
+                {
+                    "judge_backend": backend,
+                    "dataset": config["dataset"]["id"],
+                    "model_pair_id": config["models"]["id"],
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -594,6 +644,32 @@ def test_calibration_rejects_reusing_a_different_frozen_split(tmp_path):
         semdt_calibrator._verify_frozen_split(split, calibration, 123)
 
 
+def test_calibration_rejects_candidates_from_another_model_pair(tmp_path):
+    candidates = tmp_path / "candidates.jsonl"
+    candidates.write_text(
+        json.dumps(
+            {
+                "dataset": "sst2",
+                "metadata": {
+                    "model_pair_id": "pair-a",
+                    "old_model_id": "old",
+                    "new_model_id": "new",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = {
+        "dataset": {"id": "sst2"},
+        "models": {"id": "pair-a", "old": "old", "new": "new"},
+    }
+    semdt_calibrator._verify_candidate_scope(candidates, config)
+    config["models"]["id"] = "pair-b"
+    with pytest.raises(ValueError, match="model pairs"):
+        semdt_calibrator._verify_candidate_scope(candidates, config)
+
+
 def test_calibration_rejects_threshold_from_another_judge(tmp_path):
     threshold = tmp_path / "threshold.json"
     threshold.write_text(
@@ -604,18 +680,96 @@ def test_calibration_rejects_threshold_from_another_judge(tmp_path):
                 "threshold_search_method": "grid",
                 "threshold_step": 0.01,
                 "min_precision": 0.95,
+                "dataset": "sst2",
+                "model_pair_id": "pair-a",
             }
         ),
         encoding="utf-8",
     )
     search = {"method": "grid", "step": 0.01, "min_precision": 0.95}
     semdt_calibrator._verify_threshold_identity(
-        threshold, "openai", "model-a", search
+        threshold, "openai", "model-a", search, "sst2", "pair-a"
     )
     with pytest.raises(ValueError, match="expected"):
         semdt_calibrator._verify_threshold_identity(
-            threshold, "hf", "model-b", search
+            threshold, "hf", "model-b", search, "sst2", "pair-b"
         )
+
+
+def test_model_pair_namespace_and_run_directory_are_mandatory(tmp_path):
+    config = {
+        "output_root": str(tmp_path / "outputs"),
+        "dataset": {"id": "sst2"},
+        "models": {"id": "old-new", "old": "old", "new": "new"},
+        "manifests": {
+            role: str(tmp_path / "manifests" / "sst2" / "old-new" / filename)
+            for role, filename in {
+                "train": "train.json",
+                "test": "test.json",
+                "metadata": "metadata.json",
+            }.items()
+        },
+        "calibration": {
+            "output_root": str(tmp_path / "calibration" / "sst2" / "old-new")
+        },
+    }
+    artifacts.validate_artifact_namespaces(config, ROOT)
+    assert artifacts.run_directory(config, ROOT, "base") == (
+        tmp_path / "outputs" / "runs" / "sst2" / "old-new" / "base"
+    )
+
+    config["models"]["id"] = "unsafe/pair"
+    with pytest.raises(ValueError, match="models.id"):
+        artifacts.validate_artifact_namespaces(config, ROOT)
+
+
+def test_manifest_identity_rejects_another_model_pair_before_attack(tmp_path):
+    config = {
+        "dataset": {"id": "sst2"},
+        "models": {"id": "pair-a", "old": "old", "new": "new"},
+    }
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "dataset_id": "sst2",
+                "model_pair_id": "pair-b",
+                "split": "test",
+                "old_model_id": "old",
+                "new_model_id": "new",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="model pair"):
+        artifacts.validate_manifest_identity(manifest, config, "test", ROOT)
+
+
+def test_manifest_artifacts_are_immutable_after_creation(tmp_path):
+    first = tmp_path / "train_manifest.json"
+    second = tmp_path / "test_manifest.json"
+    manifest_preparation._write_frozen_payloads(
+        [(first, {"model_pair_id": "pair-a"}), (second, {"split": "test"})]
+    )
+    # Reusing byte-semantically identical artifacts is an idempotent operation.
+    manifest_preparation._write_frozen_payloads(
+        [(first, {"model_pair_id": "pair-a"}), (second, {"split": "test"})]
+    )
+    with pytest.raises(FileExistsError, match="Refusing to overwrite"):
+        manifest_preparation._write_frozen_payloads(
+            [(first, {"model_pair_id": "pair-b"}), (second, {"split": "test"})]
+        )
+    assert json.loads(first.read_text(encoding="utf-8"))["model_pair_id"] == (
+        "pair-a"
+    )
+
+    metadata = tmp_path / "manifest_metadata.json"
+    metadata.write_text(
+        json.dumps({"generation_config_sha256": "hash-a"}), encoding="utf-8"
+    )
+    manifest_preparation._validate_existing_generation(metadata, "hash-a")
+    with pytest.raises(FileExistsError, match="generation settings changed"):
+        manifest_preparation._validate_existing_generation(metadata, "hash-b")
 
 
 def test_stratified_1000_and_frozen_800_200_are_deterministic():

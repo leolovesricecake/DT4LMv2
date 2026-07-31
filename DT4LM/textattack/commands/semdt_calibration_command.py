@@ -234,6 +234,7 @@ class SemDTCalibrationCommand(TextAttackCommand):
             "threshold_output",
             "report_output",
             "threshold_search_method",
+            "model_pair_id",
         )
         search_candidates = _candidate_records(args.search_candidates)
         validation_candidates = _candidate_records(args.validation_candidates)
@@ -258,6 +259,15 @@ class SemDTCalibrationCommand(TextAttackCommand):
         if len(nli_configs) != 1 or nli_configs == {"null"}:
             raise ValueError(
                 "Search and validation candidates must share one NLI configuration."
+            )
+        model_pair_ids = {
+            candidate.metadata.get("model_pair_id")
+            for candidate in search_candidates + validation_candidates
+        }
+        if model_pair_ids != {args.model_pair_id}:
+            raise ValueError(
+                "Calibration candidates do not match the configured model pair: "
+                f"{model_pair_ids!r} != {args.model_pair_id!r}."
             )
         search_labels, search_rows = _successful_labels(args.search_labels)
         validation_labels, validation_rows = _successful_labels(
@@ -315,6 +325,7 @@ class SemDTCalibrationCommand(TextAttackCommand):
             ),
             threshold_search_method=args.threshold_search_method,
             threshold_step=args.threshold_step,
+            model_pair_id=args.model_pair_id,
         )
         _ensure_parent(args.threshold_output)
         artifact.save(args.threshold_output)
@@ -492,6 +503,7 @@ class SemDTCalibrationCommand(TextAttackCommand):
         parser.add_argument("--output-dir")
         parser.add_argument("--profile-output")
         parser.add_argument("--dataset")
+        parser.add_argument("--model-pair-id")
         parser.add_argument("--task-definition")
         parser.add_argument("--judge-config")
         parser.add_argument("--annotation-batch-size", type=int, default=32)

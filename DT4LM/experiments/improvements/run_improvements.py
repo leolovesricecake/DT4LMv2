@@ -13,6 +13,21 @@ import sys
 import yaml
 
 
+# Direct script execution exposes only experiments/improvements on sys.path.
+# Add the DT4LM root so every pipeline entry point shares artifact rules.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from dt4lm_artifacts import (  # noqa: E402
+    resolve_model_id,
+    resolve_path,
+    run_directory,
+    validate_artifact_namespaces,
+    validate_manifest_identity,
+)
+
+
 OBJECTIVES = {"dynamic", "static", "lexi"}
 SEMANTIC_CONSTRAINTS = {"original", "nli"}
 THRESHOLD_SOURCES = {"none", "manual", "calibrated"}
@@ -21,8 +36,7 @@ THRESHOLD_SOURCES = {"none", "manual", "calibrated"}
 def _resolve(project_root, value):
     """Interpret experiment paths relative to the checked-out DT4LM root."""
 
-    path = Path(value)
-    return path if path.is_absolute() else project_root / path
+    return resolve_path(project_root, value)
 
 
 def _load_yaml(path, label):
@@ -87,7 +101,7 @@ def _validate_experiment(experiment):
         _require(threshold, "backend", "Calibrated semantic threshold")
 
 
-def _validate_dataset_config(config):
+def _validate_dataset_config(config, project_root=PROJECT_ROOT):
     """Check fields consumed by every formal experiment invocation."""
 
     for key in ("seed", "query_budget", "output_root"):
@@ -99,9 +113,10 @@ def _validate_dataset_config(config):
             )
     for key in ("id", "textattack_spec", "test_split"):
         _require(config["dataset"], key, "dataset")
-    for key in ("new", "old"):
+    for key in ("id", "new", "old"):
         _require(config["models"], key, "models")
     _require(config["manifests"], "test", "manifests")
+    validate_artifact_namespaces(config, project_root)
 
 
 def _environment(project_root):
@@ -185,6 +200,16 @@ def _threshold_file(config, experiment, project_root):
             f"Threshold {path} belongs to backend "
             f"{artifact.get('judge_backend')!r}, not {configured_backend!r}."
         )
+    expected_scope = {
+        "dataset": str(config["dataset"]["id"]),
+        "model_pair_id": str(config["models"]["id"]),
+    }
+    actual_scope = {key: artifact.get(key) for key in expected_scope}
+    if actual_scope != expected_scope:
+        raise ValueError(
+            f"Threshold {path} belongs to {actual_scope!r}, "
+            f"not {expected_scope!r}."
+        )
     return path
 
 
@@ -213,9 +238,9 @@ def _attack_command(config, experiment, run_dir, manifest, project_root):
         "--random-seed",
         str(config["seed"]),
         "--model",
-        str(_resolve(project_root, models["new"])),
+        resolve_model_id(project_root, models["new"]),
         "--second-model",
-        str(_resolve(project_root, models["old"])),
+        resolve_model_id(project_root, models["old"]),
         "--dataset-from-huggingface",
         str(dataset["textattack_spec"]),
         "--dataset-split",
@@ -324,18 +349,23 @@ def main():
     _validate_dataset_config(config)
     _validate_experiment(experiment)
 
-    project_root = Path(__file__).resolve().parents[2]
-    output_root = _resolve(project_root, config["output_root"])
+    project_root = PROJECT_ROOT
     manifest = _resolve(project_root, config["manifests"]["test"])
     if not manifest.is_file():
         raise FileNotFoundError(
             f"Test manifest does not exist: {manifest}. "
             "Run prepare_manifests.sh first."
         )
+    validate_manifest_identity(
+        manifest,
+        config,
+        config["dataset"]["test_split"],
+        project_root,
+    )
 
-    # One invocation owns one directory, so experiments can be retried separately.
-    run_id = f"{config['dataset']['id']}-{experiment['name']}"
-    run_dir = output_root / run_id
+    # Dataset and model-pair namespaces prevent independent experiment families
+    # from colliding even when they reuse the same experiment name.
+    run_dir = run_directory(config, project_root, experiment["name"])
     run_dir.mkdir(parents=True, exist_ok=True)
     if (run_dir / "results.jsonl").exists():
         raise FileExistsError(
@@ -386,11 +416,7 @@ def main():
         evaluator.extend(["--nli-profile", str(run_dir / "nli_profile.json")])
     baseline_name = experiment.get("comparison_baseline")
     if baseline_name:
-        base_summary = (
-            output_root
-            / f"{config['dataset']['id']}-{baseline_name}"
-            / "summary.json"
-        )
+        base_summary = run_dir.parent / str(baseline_name) / "summary.json"
         if base_summary.exists():
             evaluator.extend(["--base-summary", str(base_summary)])
     if args.skip_bertscore:

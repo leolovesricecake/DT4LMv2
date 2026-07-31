@@ -99,10 +99,13 @@ class Attacker:
             # manifest used for calibration, not merely CLI display strings.
             observer.metadata.update(
                 {
+                    "dataset": manifest.dataset_id,
+                    "split": manifest.split,
                     "dataset_revision_or_fingerprint": (
                         manifest.dataset_revision_or_fingerprint
                     ),
                     "manifest_seed": manifest.seed,
+                    "model_pair_id": manifest.model_pair_id,
                     "new_model_id": manifest.new_model_id,
                     "new_model_revision": manifest.new_model_revision,
                     "old_model_id": manifest.old_model_id,

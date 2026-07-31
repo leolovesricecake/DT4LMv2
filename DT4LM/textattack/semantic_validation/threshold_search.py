@@ -43,6 +43,7 @@ class ThresholdArtifact:
     threshold_search_method: str
     threshold_step: float
     nli_config: Optional[Dict[str, Any]] = None
+    model_pair_id: Optional[str] = None
 
     def save(self, path: str) -> None:
         payload = asdict(self)
@@ -56,6 +57,7 @@ class ThresholdArtifact:
         # Historical artifacts predate explicit search provenance.
         data.setdefault("threshold_search_method", "grid")
         data.setdefault("threshold_step", 0.01)
+        data.setdefault("model_pair_id", None)
         data["search_metrics"] = ThresholdMetrics(**data["search_metrics"])
         return cls(**data)
 

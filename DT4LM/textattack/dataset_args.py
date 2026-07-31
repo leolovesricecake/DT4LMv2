@@ -324,6 +324,11 @@ class DatasetArgs:
             # Manifest filtering happens last so its indices always refer to the
             # same loaded and label-filtered dataset used during preparation.
             manifest = textattack.datasets.SampleManifest.load(args.sample_manifest)
+            if args.dataset_split and manifest.split != args.dataset_split:
+                raise ValueError(
+                    "Loaded dataset split does not match the frozen manifest: "
+                    f"{args.dataset_split!r} != {manifest.split!r}."
+                )
             dataset = textattack.datasets.ManifestDatasetView(dataset, manifest)
 
         return dataset
