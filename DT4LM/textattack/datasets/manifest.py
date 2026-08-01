@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 import json
 from typing import List, Optional
 
-from dt4lm_sampling import (
+from ..dt4lm_sampling import (
     SAMPLING_ALGORITHM_ALL,
     SAMPLING_ALGORITHM_HASH,
     select_sample_indices,

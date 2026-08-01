@@ -145,6 +145,10 @@ metrics = _load(
 dataset_module = types.ModuleType("textattack.datasets.dataset")
 dataset_module.Dataset = object
 sys.modules["textattack.datasets.dataset"] = dataset_module
+package_sampling = _load(
+    "textattack.dt4lm_sampling",
+    "textattack/dt4lm_sampling.py",
+)
 manifests = _load(
     "textattack.datasets.manifest",
     "textattack/datasets/manifest.py",
@@ -388,6 +392,24 @@ def test_manifest_selection_is_stable_and_dataset_agnostic():
             dataset_fingerprint="fingerprint",
             split="test",
         ) == list(range(20))
+
+
+def test_package_sampling_adapter_exports_selection_helpers():
+    """Keep dataset imports working when only the textattack package is mapped."""
+
+    assert package_sampling.select_sample_indices(
+        20,
+        sample_size=7,
+        seed=765,
+        dataset_fingerprint="fingerprint",
+        split="test",
+    ) == manifests.select_sample_indices(
+        20,
+        sample_size=7,
+        seed=765,
+        dataset_fingerprint="fingerprint",
+        split="test",
+    )
 
 
 def test_manifest_view_rejects_a_changed_dataset_fingerprint():

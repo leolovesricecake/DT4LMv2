@@ -69,6 +69,9 @@ setuptools.setup(
             "wandb*",
         ]
     ),
+    # Direct pipeline scripts import these lightweight helpers outside the
+    # textattack package, so include them in regular and editable installs.
+    py_modules=["dt4lm_artifacts", "dt4lm_sampling", "improvement_config"],
     extras_require=extras,
     entry_points={
         "console_scripts": ["textattack=textattack.commands.textattack_cli:main"],
