@@ -26,6 +26,10 @@ from dt4lm_artifacts import (  # noqa: E402
     validate_artifact_namespaces,
     validate_manifest_identity,
 )
+from dt4lm_dataset import (  # noqa: E402
+    load_dataset_collection,
+    validate_dataset_split_schema,
+)
 from improvement_config import load_experiment_config  # noqa: E402
 
 
@@ -190,6 +194,9 @@ def _attack_command(config, run_dir, manifest, project_root):
         str(run_dir / "results.jsonl"),
         "--log-summary-to-json",
         str(run_dir / "attack_summary.json"),
+        # First-round runs persist structured artifacts locally and never
+        # invoke TextAttack's legacy successful-example export/upload path.
+        "--do-not-push",
         "--disable-stdout",
     ]
     _append_option(command, "--model-revision", models["new"].get("revision"))
@@ -317,6 +324,11 @@ def main():
     config_path = Path(args.config).resolve()
     config = load_experiment_config(config_path)
     validate_artifact_namespaces(config, PROJECT_ROOT)
+    split = str(config["dataset"]["evaluation"]["split"])
+    collection = load_dataset_collection(config["dataset"], PROJECT_ROOT)
+    if split not in collection:
+        raise ValueError(f"Dataset has no configured evaluation split {split!r}.")
+    validate_dataset_split_schema(config["dataset"], collection[split], split)
     manifest = resolve_path(
         PROJECT_ROOT, config["dataset"]["evaluation"]["manifest"]
     )
@@ -328,7 +340,7 @@ def main():
     validate_manifest_identity(
         manifest,
         config,
-        config["dataset"]["evaluation"]["split"],
+        split,
         PROJECT_ROOT,
     )
 

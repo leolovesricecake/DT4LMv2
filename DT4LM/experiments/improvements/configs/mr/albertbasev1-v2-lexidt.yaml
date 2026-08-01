@@ -1,8 +1,8 @@
-# Complete MR Base run; Rotten Tomatoes uses one text input.
+# Complete MR LexiDT run.
 schema_version: 2
 experiment:
-  id: mr-albertbasev1-v2-base
-  method: base
+  id: mr-albertbasev1-v2-lexidt
+  method: lexidt
   seed: 765
   output_root: outputs/dt4lm-improvements
 dataset:
@@ -23,7 +23,7 @@ models:
   new: {name_or_path: outputs/finetuned/albertbasev2_mr/best_model, revision: null}
 attack:
   recipe: kuleshov_var
-  differential_objective: dynamic
+  differential_objective: lexi
   semantic_constraint: original
   query_budget: 1000
 semantic:
@@ -46,3 +46,4 @@ evaluation:
       idf: false
       rescale_with_baseline: false
       baseline_path: null
+

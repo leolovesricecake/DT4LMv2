@@ -363,9 +363,14 @@ class Attacker:
 
             self.attack_log_manager.log_result(result)
             
-            # this is extracting the original input: t1 = result.original_result.attacked_text, t1.printable_text()
-            # store the successful attack results to form baseline algorithm
-            if isinstance(result, (SuccessfulAttackResult, MaximizedAttackResult)):
+            # Legacy successful-example export parses printable text and is
+            # unrelated to structured experiment logging. Keep it opt-in.
+            if (
+                not self.attack_args.do_not_push
+                and isinstance(
+                    result, (SuccessfulAttackResult, MaximizedAttackResult)
+                )
+            ):
                 txt = result.perturbed_result.attacked_text.printable_text()
                 txt_original = result.original_result.attacked_text.printable_text()
                 lines = txt.split("\n")
@@ -667,9 +672,14 @@ class Attacker:
             except:
                 print("error occurred during result logging, please manually check the result")
 
-            # this is extracting the original input: t1 = result.original_result.attacked_text, t1.printable_text()
-            # store the successful attack results to form baseline algorithm
-            if isinstance(result, (SuccessfulAttackResult, MaximizedAttackResult)):
+            # Match the serial path: normal experiments must not enter this
+            # display-prefix parser merely because an attack succeeded.
+            if (
+                not self.attack_args.do_not_push
+                and isinstance(
+                    result, (SuccessfulAttackResult, MaximizedAttackResult)
+                )
+            ):
                 txt = result.perturbed_result.attacked_text.printable_text()
                 txt_original = result.original_result.attacked_text.printable_text()
                 lines = txt.split("\n")

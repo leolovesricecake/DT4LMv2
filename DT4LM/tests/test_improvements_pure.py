@@ -117,7 +117,10 @@ class Constraint:
 constraints_module = _namespace("textattack.constraints")
 constraints_module.Constraint = Constraint
 shared_module = _namespace("textattack.shared")
-shared_module.logger = types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+shared_module.logger = types.SimpleNamespace(
+    info=lambda *args, **kwargs: None,
+    warning=lambda *args, **kwargs: None,
+)
 logger_base_module = types.ModuleType("textattack.loggers.logger")
 logger_base_module.Logger = type("Logger", (), {"close": lambda self: None})
 sys.modules["textattack.loggers.logger"] = logger_base_module
@@ -152,6 +155,10 @@ package_sampling = _load(
 manifests = _load(
     "textattack.datasets.manifest",
     "textattack/datasets/manifest.py",
+)
+dataset_protocol = _load(
+    "dt4lm_dataset",
+    "dt4lm_dataset.py",
 )
 manifest_preparation = _load(
     "dt4lm_statistics.prepare_manifests",
@@ -281,6 +288,58 @@ def test_jsonl_status_helpers_keep_failed_and_skipped_distinct():
     assert jsonl_logger._result_status(successful) == "successful"
     assert jsonl_logger._result_status(failed) == "failed"
     assert jsonl_logger._result_status(skipped) == "skipped"
+
+
+def test_jsonl_preserves_mrpc_and_mr_structured_fields(tmp_path):
+    """Serialize pair and single-text tasks without printable-prefix parsing."""
+
+    class Text:
+        def __init__(self, fields, dataset_index):
+            self.text_input = OrderedDict(fields)
+            self.attack_attrs = {
+                "dataset_index": dataset_index,
+                "run_config_hash": "hash",
+                "modified_indices": {0},
+            }
+
+        def modification_rate(self, _):
+            return 0.25
+
+    for index, (original_fields, candidate_fields) in enumerate(
+        (
+            (
+                (("sentence1", "a"), ("sentence2", "b")),
+                (("sentence1", "a2"), ("sentence2", "b")),
+            ),
+            ((("text", "bad film"),), (("text", "poor film"),)),
+        )
+    ):
+        original = types.SimpleNamespace(
+            attacked_text=Text(original_fields, index),
+            ground_truth_output=1,
+            num_queries=1,
+            new_model_output={"predicted_label": 1},
+            old_model_output={"predicted_label": 1},
+        )
+        perturbed = types.SimpleNamespace(
+            attacked_text=Text(candidate_fields, index),
+            score=1.0,
+            objective_name="dynamic",
+            new_model_output={"predicted_label": 0},
+            old_model_output={"predicted_label": 1},
+        )
+        result = type("SuccessfulAttackResult", (), {})()
+        result.original_result = original
+        result.perturbed_result = perturbed
+        result.num_queries = 5
+        result.wall_clock_seconds = 0.1
+        result.peak_vram_bytes = 0
+        result.nli_profile = None
+        logger = jsonl_logger.JSONLLogger(str(tmp_path / f"{index}.jsonl"))
+        logger.log_attack_result(result)
+        assert logger._rows[0]["original_input"] == dict(original_fields)
+        assert logger._rows[0]["candidate_input"] == dict(candidate_fields)
+        logger.flush()
 
 
 def test_lexi_uses_prediction_state_for_tied_argmax():
@@ -484,7 +543,7 @@ def test_manifest_preparation_uses_configured_hyperparameter():
 
 
 def test_experiment_configs_define_independent_runtime_axes():
-    config_dir = ROOT / "experiments/improvements/configs/sst2"
+    config_root = ROOT / "experiments/improvements/configs"
     expected = {
         "base": ("dynamic", "original", "none"),
         "static": ("static", "original", "none"),
@@ -494,25 +553,28 @@ def test_experiment_configs_define_independent_runtime_axes():
         "semdt-hf": ("dynamic", "nli", "calibrated"),
         "combined-openai": ("lexi", "nli", "calibrated"),
     }
-    for name, axes in expected.items():
-        config = experiment_runner.load_experiment_config(
-            config_dir / f"albertbasev1-v2-{name}.yaml"
-        )
-        assert (
-            config["attack"]["differential_objective"],
-            config["attack"]["semantic_constraint"],
-            config["semantic"]["threshold"]["source"],
-        ) == axes
+    for dataset_id in ("sst2", "rte", "mrpc", "mr"):
+        for name, axes in expected.items():
+            config = experiment_runner.load_experiment_config(
+                config_root / dataset_id / f"albertbasev1-v2-{name}.yaml"
+            )
+            assert (
+                config["attack"]["differential_objective"],
+                config["attack"]["semantic_constraint"],
+                config["semantic"]["threshold"]["source"],
+            ) == axes
 
 
 def test_dataset_configs_expose_sampling_and_threshold_search():
     config_dir = ROOT / "experiments/improvements/configs"
-    sst2 = experiment_runner.load_experiment_config(
-        config_dir / "sst2/albertbasev1-v2-semdt-openai.yaml"
-    )
-    rte = experiment_runner.load_experiment_config(
-        config_dir / "rte/albertbasev1-v2-semdt-openai.yaml"
-    )
+    configs = {
+        dataset_id: experiment_runner.load_experiment_config(
+            config_dir / dataset_id / "albertbasev1-v2-semdt-openai.yaml"
+        )
+        for dataset_id in ("sst2", "rte", "mrpc", "mr")
+    }
+    sst2 = configs["sst2"]
+    rte = configs["rte"]
     assert sst2["calibration"]["source_sampling"]["sample_size"] == 500
     assert sst2["dataset"]["evaluation"]["sample_size"] == 1000
     assert rte["dataset"]["evaluation"]["sample_size"] == 1000
@@ -520,7 +582,14 @@ def test_dataset_configs_expose_sampling_and_threshold_search():
     assert sst2["dataset"]["evaluation"]["split"] == "test"
     assert rte["dataset"]["path"] == "outputs/datasets/rte"
     assert rte["dataset"]["text_columns"] == ["premise", "hypothesis"]
-    for config in (sst2, rte):
+    assert configs["mrpc"]["dataset"]["text_columns"] == [
+        "sentence1",
+        "sentence2",
+    ]
+    assert configs["mr"]["dataset"]["text_columns"] == ["text"]
+    assert "paraphrases" in configs["mrpc"]["dataset"]["task_definition"]
+    assert "sentiment" in configs["mr"]["dataset"]["task_definition"]
+    for config in configs.values():
         semdt_calibrator._validate_config(config)
         assert config["models"]["id"] == "albertbasev1-v2"
         namespace = Path(config["dataset"]["evaluation"]["manifest"]).parent.name
@@ -531,6 +600,35 @@ def test_dataset_configs_expose_sampling_and_threshold_search():
             "min_precision": 0.95,
             "bootstrap_samples": 10000,
         }
+
+
+def test_dataset_schema_preflight_supports_mrpc_and_mr():
+    """Validate both pair and single-text schemas before any model is loaded."""
+
+    class Split:
+        def __init__(self, columns):
+            self.column_names = columns
+
+    mrpc = {
+        "id": "mrpc",
+        "text_columns": ["sentence1", "sentence2"],
+        "label_column": "label",
+    }
+    mr = {
+        "id": "mr",
+        "text_columns": ["text"],
+        "label_column": "label",
+    }
+    assert dataset_protocol.validate_dataset_split_schema(
+        mrpc, Split(["sentence1", "sentence2", "label"]), "test"
+    ) == ("sentence1", "sentence2", "label")
+    assert dataset_protocol.validate_dataset_split_schema(
+        mr, Split(["text", "label"]), "test"
+    ) == ("text", "label")
+    with pytest.raises(ValueError, match="schema mismatch"):
+        dataset_protocol.validate_dataset_split_schema(
+            mrpc, Split(["premise", "hypothesis", "label"]), "test"
+        )
 
 
 def test_notebook_preprocessing_cli_has_reproducible_local_defaults():
@@ -547,6 +645,14 @@ def test_notebook_preprocessing_cli_has_reproducible_local_defaults():
         ("sentence1", "premise"),
         ("sentence2", "hypothesis"),
     )
+    mrpc = data_preprocessing.DATASET_SPECS["mrpc"]
+    assert mrpc.source == "nyu-mll/glue"
+    assert mrpc.subset == "mrpc"
+    assert mrpc.rename_columns == ()
+    mr = data_preprocessing.DATASET_SPECS["mr"]
+    assert mr.source == "cornell-movie-review-data/rotten_tomatoes"
+    assert mr.subset is None
+    assert mr.shuffle_complete_splits is True
     parsed = data_preprocessing.build_parser().parse_args(["sst2"])
     assert parsed.output_dir == "outputs/datasets/<dataset>"
     assert parsed.seed == 42
@@ -710,6 +816,16 @@ def test_attack_command_uses_each_experiment_file_instead_of_a_matrix(tmp_path):
             source == "calibrated"
         )
         assert ("--nli-entailment-threshold" in command) == (source == "manual")
+        assert "--do-not-push" in command
+
+
+def test_experiment_attacks_do_not_enter_legacy_schema_parser():
+    """Keep structured runs independent of printable dataset field prefixes."""
+
+    source = (ROOT / "textattack/attacker.py").read_text(encoding="utf-8")
+    guarded_export = "not self.attack_args.do_not_push\n                and isinstance"
+    assert source.count(guarded_export) == 2
+    assert source.count("no matching data schema for the current task") == 2
 
 
 def test_calibration_rejects_reusing_a_different_frozen_split(tmp_path):

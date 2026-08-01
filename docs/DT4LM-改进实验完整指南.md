@@ -33,6 +33,8 @@ METEOR 依赖 NLTK，BERTScore 依赖 `bert-score` 及显式配置的本地模�
 ```bash
 python datasets/preprocess_dataset.py sst2
 python datasets/preprocess_dataset.py rte
+python datasets/preprocess_dataset.py mrpc
+python datasets/preprocess_dataset.py mr
 ```
 
 默认输出：
@@ -40,11 +42,23 @@ python datasets/preprocess_dataset.py rte
 ```text
 outputs/datasets/sst2
 outputs/datasets/rte
+outputs/datasets/mrpc
+outputs/datasets/mr
 ```
 
 GLUE 的公开 test split 没有有效标签，因此脚本沿用原 notebook 的思路，将有标签
-数据以固定种子分层划分为 train、validation 和 test。RTE 会把文本列重命名为
-`premise` 和 `hypothesis`。
+数据以固定种子分层划分为 train、validation 和 test。四个数据集的冻结字段
+协议为：
+
+| 数据集 | 文本字段 | 任务 |
+| --- | --- | --- |
+| SST-2 | `sentence` | 二分类情感分析 |
+| RTE | `premise`, `hypothesis` | 蕴含判断 |
+| MRPC | `sentence1`, `sentence2` | 复述/语义等价判断 |
+| MR | `text` | 二分类电影评论情感分析 |
+
+manifest 准备和正式运行都会在加载受测模型前核对这些列。配置声明与本地数据
+不一致时会立即失败，不能依靠 TextAttack 自动猜测字段。
 
 显式指定输出路径：
 
@@ -60,19 +74,20 @@ python datasets/preprocess_dataset.py sst2 \
 
 ## 3. 准备新旧模型
 
-格式：bash experiments/finetune/<file> <DATASET> <DEVICE>
-* DATASET: sst2 rte mrpc mr
-* DEVICE: 显卡号，-1=cpu
+格式：`bash experiments/finetune/<file> <DATASET> <DEVICE>`
+
+- `DATASET`：`sst2`、`rte`、`mrpc` 或 `mr`
+- `DEVICE`：显卡号，`-1` 表示 CPU
 
 ```bash
-bash experiments/finetune/train_albertbasev1.sh
-bash experiments/finetune/train_albertbasev2.sh
+bash experiments/finetune/train_albertbasev1.sh mrpc 1
+bash experiments/finetune/train_albertbasev2.sh mrpc 1
 
-bash experiments/finetune/train_debertav1base.sh
-bash experiments/finetune/train_debertav3base.sh
+bash experiments/finetune/train_debertav1base.sh mr 1
+bash experiments/finetune/train_debertav3base.sh mr 1
 
-bash experiments/finetune/train_gpt1.sh
-bash experiments/finetune/train_gpt2.sh
+bash experiments/finetune/train_gpt1.sh sst2 1
+bash experiments/finetune/train_gpt2.sh sst2 1
 ```
 
 checkpoint：
@@ -113,6 +128,10 @@ experiments/improvements/configs/
     albertbasev1-v2-combined-openai.yaml
   rte/
     ...
+  mrpc/
+    ...
+  mr/
+    ...
 ```
 
 每份配置都显式包含：
@@ -136,7 +155,7 @@ dataset:
 ```
 
 `sample_size` 缺省、为 `null`、0 或负数时使用完整 split；正数时随机无放回
-抽取至多该数量。首轮 SST-2/RTE 都配置为 1000，RTE 不足时自动全量保留。
+抽取至多该数量。首轮四个数据集都配置为 1000，数据不足时自动全量保留。
 抽样不查询模型，也不筛选新旧模型共同预测正确的样本。
 
 ### 4.2 标定源样本数
@@ -384,10 +403,39 @@ python statistics/analyze_human_evaluation.py \
 结果按各层实际占比估计语义保持率、ValidGSR 和 ValidPaperGSR，并报告分层
 bootstrap 95% 置信区间、评审一致率和 Cohen's kappa。
 
-## 13. 完成检查
+## 13. MRPC/MR 首次运行
 
-- 14 份配置均能独立通过 schema 校验；
-- SST-2/RTE 各方法分别共享同一 test manifest；
+MRPC：
+
+```bash
+python datasets/preprocess_dataset.py mrpc
+bash experiments/finetune/train_albertbasev1.sh mrpc 1
+bash experiments/finetune/train_albertbasev2.sh mrpc 1
+bash experiments/improvements/prepare_manifests.sh \
+  experiments/improvements/configs/mrpc/albertbasev1-v2-base.yaml
+CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
+  experiments/improvements/configs/mrpc/albertbasev1-v2-base.yaml
+```
+
+MR：
+
+```bash
+python datasets/preprocess_dataset.py mr
+bash experiments/finetune/train_albertbasev1.sh mr 1
+bash experiments/finetune/train_albertbasev2.sh mr 1
+bash experiments/improvements/prepare_manifests.sh \
+  experiments/improvements/configs/mr/albertbasev1-v2-base.yaml
+CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
+  experiments/improvements/configs/mr/albertbasev1-v2-base.yaml
+```
+
+已有正确数据与 checkpoint 时，可跳过对应步骤。SemDT/OpenAI/HF 配置按第
+6-8 节先生成 train manifest 并完成阈值标定。
+
+## 14. 完成检查
+
+- 28 份配置均能独立通过 schema 校验；
+- SST-2/RTE/MRPC/MR 各方法分别共享同一 test manifest；
 - manifest 不含模型预测或共同正确样本筛选；
 - 每个 run 满足 `total = successful + failed + skipped`；
 - `results.jsonl` 的索引和顺序与 manifest 完全一致；

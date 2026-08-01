@@ -36,6 +36,8 @@ SST-2, RTE, MRPC, and MR:
 ```bash
 python datasets/preprocess_dataset.py sst2
 python datasets/preprocess_dataset.py rte
+python datasets/preprocess_dataset.py mrpc
+python datasets/preprocess_dataset.py mr
 ```
 
 Outputs default to `outputs/datasets/<dataset>` and can be changed with
@@ -51,11 +53,11 @@ subcommands in `datasets/prepare_adversarial_training.py`.
 ### Preparation (Fine-tuning)
 Example files to conduct fine-tuning is provided in `./experiments/finetune`. An example would be:
 ```bash
-   $ bash experiments/finetune/train_albertbasev1_sst2.sh
+   $ bash experiments/finetune/train_albertbasev1.sh mrpc 1
 ```
-This fine-tunes ALBERT-base-v1 on the default local SST-2 output. A custom
-dataset directory and model output directory can be passed as the first and
-second arguments. When changing hyperparameters, keep both models in a pair
+This fine-tunes ALBERT-base-v1 on the default local MRPC output using GPU 1.
+The first argument is one of `sst2`, `rte`, `mrpc`, or `mr`; the second is the
+CUDA device number. When changing hyperparameters, keep both models in a pair
 symmetric to ensure a fair comparison.
 
 For evaluating the model's performance on the test set, run:

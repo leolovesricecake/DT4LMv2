@@ -1,8 +1,8 @@
-# Complete MR Base run; Rotten Tomatoes uses one text input.
+# Complete MR SemDT sensitivity run with manual NLI thresholds.
 schema_version: 2
 experiment:
-  id: mr-albertbasev1-v2-base
-  method: base
+  id: mr-albertbasev1-v2-semdt-manual
+  method: semdt-manual
   seed: 765
   output_root: outputs/dt4lm-improvements
 dataset:
@@ -24,10 +24,24 @@ models:
 attack:
   recipe: kuleshov_var
   differential_objective: dynamic
-  semantic_constraint: original
+  semantic_constraint: nli
   query_budget: 1000
 semantic:
-  threshold: {source: none}
+  nli:
+    model_name_or_path: /mnt/huawei/nsq/models/FacebookAI/roberta-large-mnli
+    revision: null
+    tokenizer_revision: null
+    allow_remote_download: false
+    device: null
+    dtype: float32
+    batch_size: 32
+    candidate_batch_size: 1024
+    max_length: 512
+    truncation_strategy: longest_first
+  threshold:
+    source: manual
+    entailment: 0.90
+    contradiction: 0.05
 calibration:
   enabled: false
 evaluation:
@@ -46,3 +60,4 @@ evaluation:
       idf: false
       rescale_with_baseline: false
       baseline_path: null
+

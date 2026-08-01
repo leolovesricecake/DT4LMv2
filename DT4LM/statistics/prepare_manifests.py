@@ -13,6 +13,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from dt4lm_artifacts import resolve_path, validate_artifact_namespaces  # noqa: E402
+from dt4lm_dataset import (  # noqa: E402
+    load_dataset_collection,
+    validate_dataset_split_schema,
+)
 from dt4lm_sampling import (  # noqa: E402
     SAMPLING_ALGORITHM_ALL,
     SAMPLING_ALGORITHM_HASH,
@@ -21,36 +25,6 @@ from dt4lm_sampling import (  # noqa: E402
     validate_sample_manifest_payload,
 )
 from improvement_config import load_experiment_config  # noqa: E402
-
-
-def _load_dataset_collection(dataset_config, project_root):
-    """Load the local-or-Hub DatasetDict without loading either target model."""
-
-    try:
-        from datasets import load_dataset, load_from_disk
-    except ImportError as exc:
-        raise ImportError(
-            "Hugging Face 'datasets' is required to prepare sample manifests. "
-            "Install the DT4LM environment before running this command."
-        ) from exc
-
-    configured = Path(dataset_config["path"]).expanduser()
-    local_path = configured if configured.is_absolute() else project_root / configured
-    if local_path.exists():
-        return load_from_disk(str(local_path.resolve()))
-    explicitly_local = configured.is_absolute() or str(
-        dataset_config["path"]
-    ).startswith((".", "outputs/"))
-    if explicitly_local:
-        raise FileNotFoundError(
-            f"Local dataset does not exist: {local_path}. "
-            "Run datasets/preprocess_dataset.py first."
-        )
-    return load_dataset(
-        dataset_config["path"],
-        dataset_config.get("name"),
-        revision=dataset_config.get("revision"),
-    )
 
 
 def build_manifest(dataset_config, dataset, sampling):
@@ -130,12 +104,15 @@ def main():
 
     config = load_experiment_config(Path(args.config).resolve())
     validate_artifact_namespaces(config, PROJECT_ROOT)
-    collection = _load_dataset_collection(config["dataset"], PROJECT_ROOT)
+    collection = load_dataset_collection(config["dataset"], PROJECT_ROOT)
     payloads = []
     for role, sampling in configured_sampling_requests(config):
         split = str(sampling["split"])
         if split not in collection:
             raise ValueError(f"Dataset has no configured {role} split {split!r}.")
+        validate_dataset_split_schema(
+            config["dataset"], collection[split], split
+        )
         payload = build_manifest(config["dataset"], collection[split], sampling)
         validate_sample_manifest_payload(payload)
         payloads.append(

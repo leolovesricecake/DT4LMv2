@@ -64,6 +64,26 @@ def validate_experiment_config(config: Mapping[str, Any]) -> None:
         "task_definition",
     ):
         _require(dataset, key, "dataset")
+    text_columns = dataset["text_columns"]
+    if (
+        not isinstance(text_columns, list)
+        or not text_columns
+        or any(not isinstance(column, str) or not column for column in text_columns)
+        or len(set(text_columns)) != len(text_columns)
+    ):
+        raise ValueError(
+            "dataset.text_columns must be a non-empty list of unique strings."
+        )
+    label_column = dataset["label_column"]
+    if not isinstance(label_column, str) or not label_column:
+        raise ValueError("dataset.label_column must be a non-empty string.")
+    if label_column in text_columns:
+        raise ValueError("dataset.label_column cannot also be a text column.")
+    if (
+        not isinstance(dataset["task_definition"], str)
+        or not dataset["task_definition"].strip()
+    ):
+        raise ValueError("dataset.task_definition must be a non-empty string.")
     evaluation_sample = dataset.get("evaluation")
     if not isinstance(evaluation_sample, dict):
         raise ValueError("dataset.evaluation must be a mapping.")
