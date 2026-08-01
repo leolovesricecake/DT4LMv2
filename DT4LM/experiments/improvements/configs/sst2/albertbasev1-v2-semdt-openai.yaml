@@ -28,7 +28,7 @@ attack:
   query_budget: 1000
 semantic:
   nli:
-    model_name_or_path: FacebookAI/roberta-large-mnli
+    model_name_or_path: /mnt/huawei/nsq/models/FacebookAI/roberta-large-mnli
     revision: null
     tokenizer_revision: null
     allow_remote_download: true
