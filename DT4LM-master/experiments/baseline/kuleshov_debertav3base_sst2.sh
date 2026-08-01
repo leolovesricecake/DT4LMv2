@@ -1,0 +1,1 @@
+textattack attack --recipe kuleshov_var --num-examples 1000 --model ../outputs/debertav3base_sst2/best_model/ --parallel --num-workers-per-device 2 --dataset-from-huggingface user_name/sst2 --dataset-split test

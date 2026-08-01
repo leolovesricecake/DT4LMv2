@@ -13,8 +13,7 @@ from .huggingface_dataset import HuggingFaceDataset
 from .manifest import (
     ManifestDatasetView,
     SampleManifest,
-    jointly_correct_indices,
-    select_manifest_indices,
+    select_sample_indices,
 )
 
 from . import helpers

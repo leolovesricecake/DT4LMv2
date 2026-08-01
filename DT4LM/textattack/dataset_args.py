@@ -235,7 +235,7 @@ class DatasetArgs:
         parser.add_argument(
             "--sample-manifest",
             default=None,
-            help="JSON manifest that fixes eligible dataset indices and order.",
+            help="JSON manifest that fixes sampled dataset indices and order.",
         )
         return parser
 

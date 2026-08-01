@@ -1,0 +1,1 @@
+textattack train --model-name-or-path microsoft/deberta-base --dataset user_name/sst2 --model-max-length 256 --per-device-train-batch-size 32 --per-device-eval-batch-size 128 --epochs 5 --learning-rate 1e-5

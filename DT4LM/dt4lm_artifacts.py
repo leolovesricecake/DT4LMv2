@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import re
 
+from dt4lm_sampling import validate_sample_manifest_payload
+
 
 _ARTIFACT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
@@ -13,7 +15,7 @@ def require_model_pair_id(config):
 
     models = config.get("models")
     if not isinstance(models, dict):
-        raise ValueError("Dataset configuration requires mapping section 'models'.")
+        raise ValueError("Experiment configuration requires mapping section 'models'.")
     model_pair_id = models.get("id")
     if not isinstance(model_pair_id, str) or not _ARTIFACT_ID.fullmatch(
         model_pair_id
@@ -52,18 +54,21 @@ def resolve_path(project_root, configured):
 def resolve_model_id(project_root, configured):
     """Resolve local checkpoints while preserving Hugging Face model IDs."""
 
+    if isinstance(configured, dict):
+        configured = configured.get("name_or_path")
+    if not configured:
+        raise ValueError("A model name_or_path is required.")
     path = Path(configured).expanduser()
     candidate = path if path.is_absolute() else Path(project_root) / path
     return str(candidate.resolve()) if candidate.exists() else str(configured)
 
 
-def _require_namespace_suffix(path, dataset_id, model_pair_id, label, file_path):
-    """Require paths to end in the configured dataset/model-pair namespace."""
+def _require_namespace_suffix(path, expected, label, file_path):
+    """Require paths to end in a configured artifact namespace."""
 
     namespace_path = path.parent if file_path else path
-    expected = (dataset_id, model_pair_id)
-    if tuple(namespace_path.parts[-2:]) != expected:
-        expected_text = f"<root>/{dataset_id}/{model_pair_id}"
+    if tuple(namespace_path.parts[-len(expected) :]) != tuple(expected):
+        expected_text = "<root>/" + "/".join(expected)
         if file_path:
             expected_text += f"/{path.name}"
         raise ValueError(
@@ -72,60 +77,65 @@ def _require_namespace_suffix(path, dataset_id, model_pair_id, label, file_path)
 
 
 def validate_artifact_namespaces(config, project_root):
-    """Validate manifest and calibration paths against dataset and model pair."""
+    """Validate model-independent samples and model-specific run artifacts."""
 
     dataset_id, model_pair_id = artifact_namespace(config)
-    manifests = config.get("manifests")
-    if not isinstance(manifests, dict):
-        raise ValueError("Dataset configuration requires mapping section 'manifests'.")
-    for role in ("train", "test", "metadata"):
-        configured = manifests.get(role)
-        if not configured:
-            raise ValueError(f"manifests is missing required field {role!r}.")
-        _require_namespace_suffix(
-            resolve_path(project_root, configured),
-            dataset_id,
-            model_pair_id,
-            f"manifests.{role}",
-            file_path=True,
-        )
+    dataset = config.get("dataset") or {}
+    evaluation = dataset.get("evaluation") or {}
+    configured = evaluation.get("manifest")
+    if not configured:
+        raise ValueError("dataset.evaluation.manifest is required.")
+    _require_namespace_suffix(
+        resolve_path(project_root, configured),
+        (dataset_id,),
+        "dataset.evaluation.manifest",
+        file_path=True,
+    )
 
     calibration = config.get("calibration")
-    if calibration is not None:
-        if not isinstance(calibration, dict) or not calibration.get("output_root"):
-            raise ValueError(
-                "calibration.output_root is required when calibration exists."
-            )
+    if isinstance(calibration, dict) and calibration.get("enabled"):
+        source = calibration.get("source_sampling") or {}
+        source_manifest = source.get("manifest")
+        if not source_manifest:
+            raise ValueError("calibration.source_sampling.manifest is required.")
         _require_namespace_suffix(
-            resolve_path(project_root, calibration["output_root"]),
-            dataset_id,
-            model_pair_id,
-            "calibration.output_root",
+            resolve_path(project_root, source_manifest),
+            (dataset_id,),
+            "calibration.source_sampling.manifest",
+            file_path=True,
+        )
+        backend = str((calibration.get("judge") or {}).get("backend") or "")
+        if not calibration.get("output_dir") or not backend:
+            raise ValueError("Enabled calibration requires output_dir and judge.backend.")
+        _require_namespace_suffix(
+            resolve_path(project_root, calibration["output_dir"]),
+            (dataset_id, model_pair_id, backend),
+            "calibration.output_dir",
             file_path=False,
         )
 
 
-def run_directory(config, project_root, experiment_name):
+def run_directory(config, project_root, experiment_name=None):
     """Build the collision-free directory for one formal experiment run."""
 
     dataset_id, model_pair_id = artifact_namespace(config)
-    output_root = resolve_path(project_root, config["output_root"])
+    experiment = config.get("experiment") or {}
+    output_root = resolve_path(project_root, experiment["output_root"])
+    experiment_name = experiment_name or experiment["id"]
     return output_root / "runs" / dataset_id / model_pair_id / experiment_name
 
 
 def validate_manifest_identity(manifest_path, config, expected_split, project_root):
-    """Fail before model loading when a manifest belongs to another experiment."""
+    """Fail before model loading when a sample manifest belongs to other data."""
 
     path = Path(manifest_path)
     with open(path, encoding="utf-8") as handle:
         manifest = json.load(handle)
-    dataset_id, model_pair_id = artifact_namespace(config)
+    validate_sample_manifest_payload(manifest)
+    dataset_id, _ = artifact_namespace(config)
     expected = {
         "dataset_id": dataset_id,
-        "model_pair_id": model_pair_id,
         "split": expected_split,
-        "old_model_id": resolve_model_id(project_root, config["models"]["old"]),
-        "new_model_id": resolve_model_id(project_root, config["models"]["new"]),
     }
     mismatches = {
         key: {"manifest": manifest.get(key), "configured": value}
@@ -134,7 +144,7 @@ def validate_manifest_identity(manifest_path, config, expected_split, project_ro
     }
     if mismatches:
         raise ValueError(
-            f"Manifest {path} does not match the configured dataset/model pair: "
-            f"{mismatches!r}. Regenerate it in the correct namespace."
+            f"Manifest {path} does not match the configured dataset split: "
+            f"{mismatches!r}. Regenerate it in the correct dataset namespace."
         )
     return manifest

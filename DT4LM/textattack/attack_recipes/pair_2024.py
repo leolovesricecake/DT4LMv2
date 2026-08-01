@@ -100,10 +100,12 @@ class PAIR2024(AttackRecipe):
             # Dataset fingerprints and source indices are added by the manifest
             # and attacker once concrete samples have been loaded.
             metadata = {
-                "dataset": args.dataset_from_huggingface
+                "dataset": args.experiment_dataset_id
+                or args.dataset_from_huggingface
                 or args.dataset_by_model
                 or args.dataset_from_file
                 or "",
+                "model_pair_id": args.model_pair_id,
                 "split": args.dataset_split or "train",
                 "new_model_id": args.model
                 or args.model_from_huggingface

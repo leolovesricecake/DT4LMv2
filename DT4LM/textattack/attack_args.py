@@ -541,6 +541,8 @@ class _CommandLineAttackArgs:
     semantic_constraint: str = "original"
     semantic_threshold_file: str = None
     candidate_log: str = None
+    experiment_dataset_id: str = None
+    model_pair_id: str = None
     nli_model_name_or_path: str = "FacebookAI/roberta-large-mnli"
     nli_model_revision: str = None
     nli_tokenizer_revision: str = None
@@ -688,6 +690,16 @@ class _CommandLineAttackArgs:
             "--candidate-log",
             default=default_obj.candidate_log,
             help="JSONL path for candidates observed after query-budget truncation.",
+        )
+        parser.add_argument(
+            "--experiment-dataset-id",
+            default=default_obj.experiment_dataset_id,
+            help="Stable dataset ID persisted in structured experiment artifacts.",
+        )
+        parser.add_argument(
+            "--model-pair-id",
+            default=default_obj.model_pair_id,
+            help="Stable ordered model-pair ID persisted in experiment artifacts.",
         )
         parser.add_argument(
             "--nli-model-name-or-path",

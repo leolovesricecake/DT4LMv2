@@ -15,6 +15,34 @@ def _serialize_score(score):
     return score
 
 
+def _result_status(result):
+    """Map TextAttack result classes onto the frozen three-state protocol."""
+
+    class_name = result.__class__.__name__
+    if class_name == "SuccessfulAttackResult":
+        return "successful"
+    if class_name == "SkippedAttackResult":
+        return "skipped"
+    return "failed"
+
+
+def _initial_state(original):
+    """Classify the original pair prediction before any perturbation search."""
+
+    new_output = getattr(original, "new_model_output", None) or {}
+    old_output = getattr(original, "old_model_output", None) or {}
+    label = int(original.ground_truth_output)
+    new_correct = new_output.get("predicted_label") == label
+    old_correct = old_output.get("predicted_label") == label
+    if new_correct and old_correct:
+        return "both_correct"
+    if new_correct:
+        return "new_correct_old_wrong"
+    if old_correct:
+        return "already_differential"
+    return "both_wrong"
+
+
 class JSONLLogger(Logger):
     """Write one complete, machine-readable attack result per line."""
 
@@ -28,7 +56,11 @@ class JSONLLogger(Logger):
         original = result.original_result
         perturbed = result.perturbed_result
         attrs = perturbed.attacked_text.attack_attrs
+        status = _result_status(result)
+        initial_state = _initial_state(original)
+        initial_queries = int(getattr(original, "num_queries", 1) or 1)
         row = {
+            "schema_version": 2,
             "dataset_index": attrs.get(
                 "dataset_index",
                 original.attacked_text.attack_attrs.get("dataset_index"),
@@ -41,10 +73,28 @@ class JSONLLogger(Logger):
             "candidate_input": dict(perturbed.attacked_text.text_input),
             "ground_truth_output": original.ground_truth_output,
             "result_type": result.__class__.__name__.replace("AttackResult", ""),
-            "success": result.__class__.__name__ == "SuccessfulAttackResult",
+            "result_status": status,
+            "initial_state": initial_state,
+            "skip_reason": (
+                "already_differential" if status == "skipped" else None
+            ),
+            # Keep the legacy boolean during migration; all new metrics use
+            # result_status so skipped and failed cannot be conflated.
+            "success": status == "successful",
             "model_pair_queries": result.num_queries,
+            "initial_model_pair_queries": initial_queries,
+            "search_model_pair_queries": max(0, result.num_queries - initial_queries),
+            "queries_to_success": (
+                result.num_queries if status == "successful" else None
+            ),
             "objective": getattr(perturbed, "objective_name", None),
             "objective_score": _serialize_score(perturbed.score),
+            "original_new_model_output": getattr(
+                original, "new_model_output", None
+            ),
+            "original_old_model_output": getattr(
+                original, "old_model_output", None
+            ),
             "new_model_output": getattr(perturbed, "new_model_output", None),
             "old_model_output": getattr(perturbed, "old_model_output", None),
             "modified_indices": sorted(attrs.get("modified_indices", set())),

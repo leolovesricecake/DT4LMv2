@@ -14,6 +14,15 @@ def read_jsonl(path):
         return [json.loads(line) for line in handle if line.strip()]
 
 
+def _is_success(row):
+    """Use the explicit result status while retaining readable legacy errors."""
+
+    status = row.get("result_status")
+    if status not in {"successful", "failed", "skipped"}:
+        raise ValueError(f"Invalid or missing result_status: {status!r}.")
+    return status == "successful"
+
+
 def _allocate(groups, target):
     """Honor five-item minima, then allocate remaining slots proportionally."""
 
@@ -90,8 +99,8 @@ def main():
 
     groups = defaultdict(list)
     for dataset_index in sorted(base):
-        base_success = bool(base[dataset_index]["success"])
-        semdt_success = bool(semdt[dataset_index]["success"])
+        base_success = _is_success(base[dataset_index])
+        semdt_success = _is_success(semdt[dataset_index])
         if base_success and semdt_success:
             groups["common_success"].append(dataset_index)
         elif base_success:
@@ -112,9 +121,9 @@ def main():
     key_rows = []
     for ordinal, (stratum, dataset_index) in enumerate(selected, start=1):
         candidates = []
-        if base[dataset_index]["success"]:
+        if _is_success(base[dataset_index]):
             candidates.append(("Base", base[dataset_index]["candidate_input"]))
-        if semdt[dataset_index]["success"]:
+        if _is_success(semdt[dataset_index]):
             candidates.append(("SemDT", semdt[dataset_index]["candidate_input"]))
         rng.shuffle(candidates)
         review_id = f"human-{ordinal:04d}"
@@ -154,7 +163,7 @@ def main():
     key_payload = {
         "seed": args.seed,
         "sample_count": len(review_rows),
-        "manifest_sample_count": manifest["sample_count"],
+        "manifest_sample_count": manifest["effective_sample_size"],
         "stratum_populations": {
             stratum: len(rows) for stratum, rows in groups.items()
         },

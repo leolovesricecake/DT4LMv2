@@ -29,7 +29,9 @@ def _cohen_kappa(pairs):
     return (agreement - chance) / (1 - chance) if chance != 1 else 1.0
 
 
-def _method_estimates(observations, populations, sample_count):
+def _method_estimates(
+    observations, populations, sample_count, attackable_counts=None
+):
     """Estimate semantic rate and ValidGSR using actual success strata."""
 
     by_method_stratum = defaultdict(list)
@@ -66,6 +68,11 @@ def _method_estimates(observations, populations, sample_count):
                 numerator / success_total if success_total else None
             ),
             "valid_gsr": numerator / sample_count,
+            "valid_paper_gsr": (
+                numerator / attackable_counts[method]
+                if attackable_counts and attackable_counts.get(method)
+                else None
+            ),
             "strata": strata,
         }
     return output
@@ -86,8 +93,8 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=765)
-    parser.add_argument("--base-summary")
-    parser.add_argument("--semdt-summary")
+    parser.add_argument("--base-core")
+    parser.add_argument("--semdt-core")
     args = parser.parse_args()
 
     reviews = {row["review_id"]: row for row in read_jsonl(args.reviews)}
@@ -127,13 +134,33 @@ def main():
 
     populations = key["stratum_populations"]
     sample_count = int(key["manifest_sample_count"])
-    estimates = _method_estimates(observations, populations, sample_count)
+    attackable_counts = None
+    if args.base_core or args.semdt_core:
+        if not args.base_core or not args.semdt_core:
+            raise ValueError("--base-core and --semdt-core must be provided together.")
+        with open(args.base_core, encoding="utf-8") as handle:
+            base_core = json.load(handle)
+        with open(args.semdt_core, encoding="utf-8") as handle:
+            semdt_core = json.load(handle)
+        if base_core["total"] != sample_count or semdt_core["total"] != sample_count:
+            raise ValueError("Core metrics and human-evaluation manifest sizes differ.")
+        attackable_counts = {
+            "Base": int(base_core["attackable"]),
+            "SemDT": int(semdt_core["attackable"]),
+        }
+    estimates = _method_estimates(
+        observations, populations, sample_count, attackable_counts
+    )
     by_stratum = defaultdict(list)
     for observation in observations:
         by_stratum[observation["stratum"]].append(observation)
     rng = random.Random(args.seed)
     bootstrap = {
-        method: {"semantic_preservation_rate": [], "valid_gsr": []}
+        method: {
+            "semantic_preservation_rate": [],
+            "valid_gsr": [],
+            "valid_paper_gsr": [],
+        }
         for method in ("Base", "SemDT")
     }
     for _ in range(args.bootstrap_samples):
@@ -141,7 +168,9 @@ def main():
         resampled = []
         for rows in by_stratum.values():
             resampled.extend(rng.choice(rows) for _ in rows)
-        iteration = _method_estimates(resampled, populations, sample_count)
+        iteration = _method_estimates(
+            resampled, populations, sample_count, attackable_counts
+        )
         for method in bootstrap:
             for metric in bootstrap[method]:
                 value = iteration[method][metric]
@@ -149,7 +178,9 @@ def main():
                     bootstrap[method][metric].append(value)
     for method in estimates:
         for metric, values in bootstrap[method].items():
-            estimates[method][f"{metric}_bootstrap_95"] = _percentile(values)
+            estimates[method][f"{metric}_bootstrap_95"] = (
+                _percentile(values) if values else None
+            )
 
     agreement = sum(left == right for left, right in reviewer_pairs) / len(
         reviewer_pairs
@@ -168,35 +199,6 @@ def main():
             estimates["SemDT"]["valid_gsr"] >= estimates["Base"]["valid_gsr"]
         ),
     }
-    if args.base_summary and args.semdt_summary:
-        with open(args.base_summary, encoding="utf-8") as handle:
-            base_automatic = json.load(handle)
-        with open(args.semdt_summary, encoding="utf-8") as handle:
-            semdt_automatic = json.load(handle)
-        base_qps = base_automatic["model_pair_qps"]
-        semdt_qps = semdt_automatic["model_pair_qps"]
-        qps_increase = (
-            (semdt_qps - base_qps) / base_qps
-            if base_qps not in {None, 0} and semdt_qps is not None
-            else None
-        )
-        semantic_gain = output["semdt_semantic_improvement_pp"]
-        output["semdt_expansion_decision"] = {
-            "semantic_gain_at_least_5pp": semantic_gain >= 5,
-            "valid_gsr_not_below_base": output[
-                "semdt_valid_gsr_not_below_base"
-            ],
-            "qps_increase_at_most_30pct": (
-                qps_increase <= 0.30 if qps_increase is not None else None
-            ),
-            "qps_relative_increase": qps_increase,
-            "passes": (
-                semantic_gain >= 5
-                and output["semdt_valid_gsr_not_below_base"]
-                and qps_increase is not None
-                and qps_increase <= 0.30
-            ),
-        }
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump(output, handle, ensure_ascii=True, indent=2, sort_keys=True)

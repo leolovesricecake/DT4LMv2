@@ -1,5 +1,5 @@
-# Copy this template to DT4LM/configs/<name>.secert.yaml for local runs.
-# Files matching **.secert.yaml are ignored so credentials cannot enter git.
+# Copy this template to DT4LM/configs/<name>.secret.yaml for local runs.
+# Both the corrected *.secret.yaml suffix and legacy *.secert.yaml suffix are ignored.
 backend: openai
 
 openai:

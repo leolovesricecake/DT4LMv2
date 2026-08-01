@@ -1,146 +1,140 @@
-"""Immutable sample manifests for comparable differential experiments."""
+"""Immutable, model-independent sample manifests for DT4LM experiments."""
 
 from dataclasses import asdict, dataclass
 import json
-import random
-from typing import Iterable, List, Optional, Sequence
+from typing import List, Optional
+
+from dt4lm_sampling import (
+    SAMPLING_ALGORITHM_ALL,
+    SAMPLING_ALGORITHM_HASH,
+    select_sample_indices,
+    selection_hash,
+)
 
 from .dataset import Dataset
 
 
 @dataclass(frozen=True)
 class SampleManifest:
-    """The exact eligible population and selected attack sample order."""
+    """The exact ordered random sample selected from one dataset split."""
 
+    schema_version: int
     dataset_id: str
-    dataset_revision_or_fingerprint: str
+    dataset_fingerprint: str
+    dataset_revision: Optional[str]
     split: str
-    model_pair_id: str
-    old_model_id: str
-    new_model_id: str
-    generation_config_sha256: str
+    population_size: int
+    requested_sample_size: Optional[int]
+    effective_sample_size: int
     seed: int
-    test_split_size: int
-    eligible_indices: List[int]
+    sampling_algorithm: str
     selected_indices: List[int]
-    old_model_revision: Optional[str] = None
-    new_model_revision: Optional[str] = None
-
-    @property
-    def eligible_count(self) -> int:
-        return len(self.eligible_indices)
+    selection_sha256: str
 
     @property
     def sample_count(self) -> int:
-        return len(self.selected_indices)
+        """Retain the conventional name used by TextAttack metric adapters."""
+
+        return self.effective_sample_size
 
     def validate(self) -> None:
         """Reject malformed manifests before they can alter metric denominators."""
 
-        if not self.dataset_id or not self.split or not self.model_pair_id:
-            raise ValueError(
-                "Manifest dataset_id, split, and model_pair_id must be non-empty."
-            )
-        if not self.generation_config_sha256:
-            raise ValueError("Manifest generation_config_sha256 must be non-empty.")
-        if self.test_split_size <= 0:
-            raise ValueError("test_split_size must be positive.")
-        if not self.eligible_indices:
-            raise ValueError("A sample manifest must contain eligible samples.")
-        if len(set(self.eligible_indices)) != len(self.eligible_indices):
-            raise ValueError("eligible_indices contains duplicates.")
+        if self.schema_version != 2:
+            raise ValueError("Sample manifest schema_version must be 2.")
+        if not self.dataset_id or not self.split:
+            raise ValueError("Manifest dataset_id and split must be non-empty.")
+        if self.population_size <= 0:
+            raise ValueError("population_size must be positive.")
+        if self.effective_sample_size != len(self.selected_indices):
+            raise ValueError("effective_sample_size does not match selected_indices.")
+        if not self.selected_indices:
+            raise ValueError("A sample manifest must select at least one row.")
         if len(set(self.selected_indices)) != len(self.selected_indices):
             raise ValueError("selected_indices contains duplicates.")
-        eligible = set(self.eligible_indices)
-        if any(index not in eligible for index in self.selected_indices):
-            raise ValueError("Every selected index must also be eligible.")
         if any(
-            index < 0 or index >= self.test_split_size
-            for index in self.eligible_indices
+            index < 0 or index >= self.population_size
+            for index in self.selected_indices
         ):
-            raise ValueError("Manifest indices must lie inside the test split.")
+            raise ValueError("Manifest indices must lie inside the source split.")
+        if self.sampling_algorithm not in {
+            SAMPLING_ALGORITHM_ALL,
+            SAMPLING_ALGORITHM_HASH,
+        }:
+            raise ValueError("Unsupported sampling_algorithm in sample manifest.")
+        expected_hash = selection_hash(
+            self.dataset_id,
+            self.dataset_fingerprint,
+            self.split,
+            self.seed,
+            self.selected_indices,
+        )
+        if self.selection_sha256 != expected_hash:
+            raise ValueError("selection_sha256 does not match selected_indices.")
 
     def to_dict(self):
-        data = asdict(self)
-        # Store derived counts to make experiment artifacts self-describing.
-        data["eligible_count"] = self.eligible_count
-        data["sample_count"] = self.sample_count
-        return data
+        """Return the versioned JSON representation without derived legacy fields."""
+
+        return asdict(self)
 
     def save(self, path: str) -> None:
         self.validate()
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump(self.to_dict(), handle, ensure_ascii=True, indent=2)
+            json.dump(
+                self.to_dict(), handle, ensure_ascii=True, indent=2, sort_keys=True
+            )
 
     @classmethod
     def load(cls, path: str):
         with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-        # Counts are derived and are verified rather than trusted on load.
-        expected_eligible_count = data.pop("eligible_count", None)
-        expected_sample_count = data.pop("sample_count", None)
-        manifest = cls(**data)
+            manifest = cls(**json.load(handle))
         manifest.validate()
-        if (
-            expected_eligible_count is not None
-            and expected_eligible_count != manifest.eligible_count
-        ):
-            raise ValueError("eligible_count does not match eligible_indices.")
-        if (
-            expected_sample_count is not None
-            and expected_sample_count != manifest.sample_count
-        ):
-            raise ValueError("sample_count does not match selected_indices.")
         return manifest
 
-
-def jointly_correct_indices(
-    labels: Sequence[int],
-    new_predictions: Sequence[int],
-    old_predictions: Sequence[int],
-) -> List[int]:
-    """Return indices where both model predictions equal the gold label."""
-
-    if not (
-        len(labels) == len(new_predictions) == len(old_predictions)
+    @classmethod
+    def create(
+        cls,
+        *,
+        dataset_id: str,
+        dataset_fingerprint: str,
+        dataset_revision: Optional[str],
+        split: str,
+        population_size: int,
+        requested_sample_size: Optional[int],
+        seed: int,
     ):
-        raise ValueError("Labels and prediction sequences must have equal lengths.")
-    return [
-        index
-        for index, (label, new_prediction, old_prediction) in enumerate(
-            zip(labels, new_predictions, old_predictions)
-        )
-        if int(new_prediction) == int(label) and int(old_prediction) == int(label)
-    ]
+        """Build a validated manifest from the public sampling protocol."""
 
-
-def select_manifest_indices(
-    eligible_indices: Iterable[int],
-    *,
-    strategy: str,
-    sample_size: Optional[int] = None,
-    seed: int = 765,
-) -> List[int]:
-    """Select eligible indices using an explicit dataset-agnostic policy."""
-
-    eligible = sorted(eligible_indices)
-    if not eligible:
-        raise ValueError("No jointly correct eligible samples are available.")
-    if strategy == "all":
-        return eligible
-    if strategy not in {"random_exact", "random_up_to"}:
-        raise ValueError(
-            "strategy must be 'all', 'random_exact', or 'random_up_to'."
+        selected = select_sample_indices(
+            population_size,
+            sample_size=requested_sample_size,
+            seed=seed,
+            dataset_fingerprint=dataset_fingerprint,
+            split=split,
         )
-    if sample_size is None or sample_size <= 0:
-        raise ValueError("A positive sample_size is required for random sampling.")
-    if strategy == "random_exact" and len(eligible) < sample_size:
-        raise ValueError(
-            f"Requested {sample_size} eligible samples, got {len(eligible)}."
+        algorithm = (
+            SAMPLING_ALGORITHM_ALL
+            if len(selected) == population_size
+            else SAMPLING_ALGORITHM_HASH
         )
-    selected_size = min(sample_size, len(eligible))
-    # Sorting before sampling makes the result independent of iterator order.
-    return random.Random(seed).sample(eligible, selected_size)
+        manifest = cls(
+            schema_version=2,
+            dataset_id=dataset_id,
+            dataset_fingerprint=dataset_fingerprint,
+            dataset_revision=dataset_revision,
+            split=split,
+            population_size=population_size,
+            requested_sample_size=requested_sample_size,
+            effective_sample_size=len(selected),
+            seed=int(seed),
+            sampling_algorithm=algorithm,
+            selected_indices=selected,
+            selection_sha256=selection_hash(
+                dataset_id, dataset_fingerprint, split, seed, selected
+            ),
+        )
+        manifest.validate()
+        return manifest
 
 
 class ManifestDatasetView(Dataset):
@@ -150,20 +144,20 @@ class ManifestDatasetView(Dataset):
         manifest.validate()
         source = getattr(dataset, "_dataset", None)
         actual_fingerprint = getattr(source, "_fingerprint", None)
-        expected_fingerprint = manifest.dataset_revision_or_fingerprint
-        # Hugging Face fingerprints bind indices to exact dataset content. A
-        # custom Dataset without fingerprint metadata keeps legacy behavior.
         if (
-            expected_fingerprint
+            manifest.dataset_fingerprint
             and actual_fingerprint
-            and expected_fingerprint != actual_fingerprint
+            and manifest.dataset_fingerprint != actual_fingerprint
         ):
             raise ValueError(
                 "Loaded dataset fingerprint does not match the frozen manifest: "
-                f"{actual_fingerprint!r} != {expected_fingerprint!r}."
+                f"{actual_fingerprint!r} != {manifest.dataset_fingerprint!r}."
             )
-        if any(index >= len(dataset) for index in manifest.selected_indices):
-            raise ValueError("Manifest selects an index outside the loaded dataset.")
+        if len(dataset) != manifest.population_size:
+            raise ValueError(
+                "Loaded dataset size does not match the frozen manifest: "
+                f"{len(dataset)} != {manifest.population_size}."
+            )
         self._source_dataset = dataset
         self._selected_indices = tuple(manifest.selected_indices)
         self.manifest = manifest

@@ -1,0 +1,1 @@
+textattack train --model-name-or-path openai-community/gpt2 --dataset user_name/adv_training_dataset_obtained_from_ipynb --model-max-length 128 --per-device-train-batch-size 64 --per-device-eval-batch-size 256 --epochs 5 --learning-rate 2e-5

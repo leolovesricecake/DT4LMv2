@@ -1,8 +1,0 @@
-# LexiDT changes only the differential objective and its comparator.
-name: lexidt
-base_recipe: kuleshov_var
-differential_objective: lexi
-semantic_constraint: original
-semantic_threshold:
-  source: none
-comparison_baseline: base

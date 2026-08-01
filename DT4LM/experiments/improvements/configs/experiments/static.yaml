@@ -1,8 +1,0 @@
-# Static objective ablation with the unchanged Kuleshov semantic constraints.
-name: static
-base_recipe: kuleshov_var
-differential_objective: static
-semantic_constraint: original
-semantic_threshold:
-  source: none
-comparison_baseline: base

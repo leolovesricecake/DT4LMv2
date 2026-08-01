@@ -57,13 +57,11 @@ class DifferentialClassification(ClassificationGoalFunction):
         old_output: ClassificationModelOutput,
         _,
     ):
-        """Only jointly correct original inputs are eligible for generation."""
+        """Skip only inputs that already satisfy the differential goal."""
 
         self._validate_label(new_output, old_output)
-        label = int(self.ground_truth_output)
-        return not (
-            new_output.predicted_label == label
-            and old_output.predicted_label == label
+        return differential_success(
+            new_output, old_output, int(self.ground_truth_output)
         )
 
     def _get_score(

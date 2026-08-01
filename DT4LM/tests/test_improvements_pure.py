@@ -47,6 +47,19 @@ objectives = _load(
     "textattack.goal_functions.classification.differential_objectives",
     "textattack/goal_functions/classification/differential_objectives.py",
 )
+classification_goal_stub = types.ModuleType(
+    "textattack.goal_functions.classification.classification_goal_function"
+)
+classification_goal_stub.ClassificationGoalFunction = type(
+    "ClassificationGoalFunction", (), {}
+)
+sys.modules[
+    "textattack.goal_functions.classification.classification_goal_function"
+] = classification_goal_stub
+differential_goal = _load(
+    "textattack.goal_functions.classification.differential_classification",
+    "textattack/goal_functions/classification/differential_classification.py",
+)
 schemas = _load(
     "textattack.semantic_validation.schemas",
     "textattack/semantic_validation/schemas.py",
@@ -105,6 +118,13 @@ constraints_module = _namespace("textattack.constraints")
 constraints_module.Constraint = Constraint
 shared_module = _namespace("textattack.shared")
 shared_module.logger = types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+logger_base_module = types.ModuleType("textattack.loggers.logger")
+logger_base_module.Logger = type("Logger", (), {"close": lambda self: None})
+sys.modules["textattack.loggers.logger"] = logger_base_module
+jsonl_logger = _load(
+    "textattack.loggers.jsonl_logger",
+    "textattack/loggers/jsonl_logger.py",
+)
 nli_module = _load(
     "textattack.constraints.semantics.bidirectional_nli",
     "textattack/constraints/semantics/bidirectional_nli.py",
@@ -231,6 +251,34 @@ def test_dynamic_static_and_success_match_definitions():
     )
 
 
+def test_differential_goal_skips_only_preexisting_differentials():
+    goal = differential_goal.DifferentialClassification.__new__(
+        differential_goal.DifferentialClassification
+    )
+    goal.ground_truth_output = 0
+    correct = output([0.8, 0.2])
+    wrong = output([0.2, 0.8])
+    assert not goal._should_skip_2(correct, correct, None)
+    assert not goal._should_skip_2(correct, wrong, None)
+    assert not goal._should_skip_2(wrong, wrong, None)
+    assert goal._should_skip_2(wrong, correct, None)
+
+
+def test_jsonl_status_helpers_keep_failed_and_skipped_distinct():
+    original = types.SimpleNamespace(
+        ground_truth_output=0,
+        new_model_output={"predicted_label": 1},
+        old_model_output={"predicted_label": 0},
+    )
+    assert jsonl_logger._initial_state(original) == "already_differential"
+    successful = type("SuccessfulAttackResult", (), {})()
+    failed = type("FailedAttackResult", (), {})()
+    skipped = type("SkippedAttackResult", (), {})()
+    assert jsonl_logger._result_status(successful) == "successful"
+    assert jsonl_logger._result_status(failed) == "failed"
+    assert jsonl_logger._result_status(skipped) == "skipped"
+
+
 def test_lexi_uses_prediction_state_for_tied_argmax():
     # NumPy argmax chooses label 0 on a tie, so label 1 is explicitly wrong
     # even though the corresponding margin is exactly zero.
@@ -316,44 +364,50 @@ def test_shared_greedy_search_propagates_unexpected_errors():
         search.perform_search(initial)
 
 
-def test_manifest_selection_is_explicit_and_dataset_agnostic():
-    selected = manifests.select_manifest_indices(
-        range(20), strategy="random_exact", sample_size=7, seed=765
+def test_manifest_selection_is_stable_and_dataset_agnostic():
+    selected = manifests.select_sample_indices(
+        20,
+        sample_size=7,
+        seed=765,
+        dataset_fingerprint="fingerprint",
+        split="test",
     )
     assert len(selected) == 7
-    assert selected == manifests.select_manifest_indices(
-        range(20), strategy="random_exact", sample_size=7, seed=765
+    assert selected == manifests.select_sample_indices(
+        20,
+        sample_size=7,
+        seed=765,
+        dataset_fingerprint="fingerprint",
+        split="test",
     )
-    assert manifests.select_manifest_indices(
-        [4, 2, 3], strategy="all"
-    ) == [2, 3, 4]
-    assert len(
-        manifests.select_manifest_indices(
-            range(3), strategy="random_up_to", sample_size=10
-        )
-    ) == 3
-    with pytest.raises(ValueError, match="Requested 10"):
-        manifests.select_manifest_indices(
-            range(3), strategy="random_exact", sample_size=10
-        )
-    assert manifests.jointly_correct_indices(
-        [0, 1, 0], [0, 1, 1], [0, 0, 0]
-    ) == [0]
+    for size in (None, 0, -1, 20, 100):
+        assert manifests.select_sample_indices(
+            20,
+            sample_size=size,
+            seed=765,
+            dataset_fingerprint="fingerprint",
+            split="test",
+        ) == list(range(20))
 
 
 def test_manifest_view_rejects_a_changed_dataset_fingerprint():
     manifest = manifests.SampleManifest(
+        schema_version=2,
         dataset_id="sst2",
-        dataset_revision_or_fingerprint="frozen-fingerprint",
+        dataset_fingerprint="frozen-fingerprint",
+        dataset_revision=None,
         split="test",
-        model_pair_id="old-new",
-        old_model_id="old",
-        new_model_id="new",
-        generation_config_sha256="config-hash",
+        population_size=2,
+        requested_sample_size=None,
+        effective_sample_size=2,
         seed=765,
-        test_split_size=2,
-        eligible_indices=[0, 1],
+        sampling_algorithm="all_v1",
         selected_indices=[0, 1],
+        selection_sha256=(
+            manifests.selection_hash(
+                "sst2", "frozen-fingerprint", "test", 765, [0, 1]
+            )
+        ),
     )
 
     class SourceDataset:
@@ -373,20 +427,26 @@ def test_manifest_view_rejects_a_changed_dataset_fingerprint():
 
 
 def test_manifest_preparation_uses_configured_hyperparameter():
-    policy = {"strategy": "random_up_to", "size": 4}
-    selected = manifest_preparation._select_indices(
-        range(10), policy, seed=765, role="calibration_originals"
-    )
-    assert len(selected) == 4
-    assert selected == manifest_preparation._select_indices(
-        range(10), policy, seed=765, role="calibration_originals"
-    )
+    class Split:
+        _fingerprint = "fingerprint"
+
+        def __len__(self):
+            return 10
+
+    dataset = Split()
+    config = {"id": "sst2", "revision": None}
+    sampling = {
+        "split": "test",
+        "sample_size": 4,
+        "sample_seed": 765,
+    }
+    manifest = manifest_preparation.build_manifest(config, dataset, sampling)
+    assert manifest["requested_sample_size"] == 4
+    assert manifest["effective_sample_size"] == 4
 
 
 def test_experiment_configs_define_independent_runtime_axes():
-    import yaml
-
-    config_dir = ROOT / "experiments/improvements/configs/experiments"
+    config_dir = ROOT / "experiments/improvements/configs/sst2"
     expected = {
         "base": ("dynamic", "original", "none"),
         "static": ("static", "original", "none"),
@@ -394,38 +454,39 @@ def test_experiment_configs_define_independent_runtime_axes():
         "semdt-manual": ("dynamic", "nli", "manual"),
         "semdt-openai": ("dynamic", "nli", "calibrated"),
         "semdt-hf": ("dynamic", "nli", "calibrated"),
-        "combined": ("lexi", "nli", "calibrated"),
+        "combined-openai": ("lexi", "nli", "calibrated"),
     }
     for name, axes in expected.items():
-        experiment = yaml.safe_load(
-            (config_dir / f"{name}.yaml").read_text(encoding="utf-8")
+        config = experiment_runner.load_experiment_config(
+            config_dir / f"albertbasev1-v2-{name}.yaml"
         )
-        experiment_runner._validate_experiment(experiment)
         assert (
-            experiment["differential_objective"],
-            experiment["semantic_constraint"],
-            experiment["semantic_threshold"]["source"],
+            config["attack"]["differential_objective"],
+            config["attack"]["semantic_constraint"],
+            config["semantic"]["threshold"]["source"],
         ) == axes
 
 
 def test_dataset_configs_expose_sampling_and_threshold_search():
-    import yaml
-
     config_dir = ROOT / "experiments/improvements/configs"
-    sst2 = yaml.safe_load((config_dir / "sst2.yaml").read_text(encoding="utf-8"))
-    rte = yaml.safe_load((config_dir / "rte.yaml").read_text(encoding="utf-8"))
-    assert sst2["sampling"]["calibration_originals"]["size"] == 500
-    assert sst2["sampling"]["test"] == {"strategy": "all"}
-    assert rte["sampling"]["test"] == {"strategy": "all"}
+    sst2 = experiment_runner.load_experiment_config(
+        config_dir / "sst2/albertbasev1-v2-semdt-openai.yaml"
+    )
+    rte = experiment_runner.load_experiment_config(
+        config_dir / "rte/albertbasev1-v2-semdt-openai.yaml"
+    )
+    assert sst2["calibration"]["source_sampling"]["sample_size"] == 500
+    assert sst2["dataset"]["evaluation"]["sample_size"] == 1000
+    assert rte["dataset"]["evaluation"]["sample_size"] == 1000
     assert sst2["dataset"]["path"] == "outputs/datasets/sst2"
-    assert sst2["dataset"]["test_split"] == "test"
+    assert sst2["dataset"]["evaluation"]["split"] == "test"
     assert rte["dataset"]["path"] == "outputs/datasets/rte"
     assert rte["dataset"]["text_columns"] == ["premise", "hypothesis"]
     for config in (sst2, rte):
         semdt_calibrator._validate_config(config)
-        assert config["models"]["id"] == "albertbasev1-albertbasev2"
-        namespace = Path(config["manifests"]["test"]).parent.parts[-2:]
-        assert namespace == (config["dataset"]["id"], config["models"]["id"])
+        assert config["models"]["id"] == "albertbasev1-v2"
+        namespace = Path(config["dataset"]["evaluation"]["manifest"]).parent.name
+        assert namespace == config["dataset"]["id"]
         assert config["calibration"]["threshold_search"] == {
             "method": "grid",
             "step": 0.01,
@@ -576,50 +637,37 @@ def test_rte_notebook_conversion_filters_and_stratifies(monkeypatch):
 
 
 def test_attack_command_uses_each_experiment_file_instead_of_a_matrix(tmp_path):
-    import yaml
-
-    config_dir = ROOT / "experiments/improvements/configs"
-    config = yaml.safe_load(
-        (config_dir / "sst2.yaml").read_text(encoding="utf-8")
-    )
-    calibration_root = (
-        tmp_path
-        / "calibration"
-        / config["dataset"]["id"]
-        / config["models"]["id"]
-    )
-    config["calibration"]["output_root"] = str(calibration_root)
-    for backend in ("openai", "hf"):
-        threshold = calibration_root / backend / "threshold.json"
-        threshold.parent.mkdir(parents=True, exist_ok=True)
-        threshold.write_text(
-            json.dumps(
-                {
-                    "judge_backend": backend,
-                    "dataset": config["dataset"]["id"],
-                    "model_pair_id": config["models"]["id"],
-                }
-            ),
-            encoding="utf-8",
-        )
-
-    experiment_dir = config_dir / "experiments"
-    for path in experiment_dir.glob("*.yaml"):
-        experiment = yaml.safe_load(path.read_text(encoding="utf-8"))
+    config_dir = ROOT / "experiments/improvements/configs/sst2"
+    for path in config_dir.glob("*.yaml"):
+        config = experiment_runner.load_experiment_config(path)
+        threshold_config = config["semantic"]["threshold"]
+        if threshold_config["source"] == "calibrated":
+            threshold = tmp_path / path.stem / "threshold.json"
+            threshold.parent.mkdir(parents=True, exist_ok=True)
+            threshold.write_text(
+                json.dumps(
+                    {
+                        "judge_backend": threshold_config["backend"],
+                        "dataset": config["dataset"]["id"],
+                        "model_pair_id": config["models"]["id"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            threshold_config["artifact"] = str(threshold)
         command = experiment_runner._attack_command(
             config,
-            experiment,
             tmp_path / "run",
             tmp_path / "manifest.json",
             ROOT,
         )
         assert command[command.index("--differential-objective") + 1] == (
-            experiment["differential_objective"]
+            config["attack"]["differential_objective"]
         )
         assert command[command.index("--semantic-constraint") + 1] == (
-            experiment["semantic_constraint"]
+            config["attack"]["semantic_constraint"]
         )
-        source = experiment["semantic_threshold"]["source"]
+        source = threshold_config["source"]
         assert ("--semantic-threshold-file" in command) == (
             source == "calibrated"
         )
@@ -698,20 +746,22 @@ def test_calibration_rejects_threshold_from_another_judge(tmp_path):
 
 def test_model_pair_namespace_and_run_directory_are_mandatory(tmp_path):
     config = {
-        "output_root": str(tmp_path / "outputs"),
-        "dataset": {"id": "sst2"},
-        "models": {"id": "old-new", "old": "old", "new": "new"},
-        "manifests": {
-            role: str(tmp_path / "manifests" / "sst2" / "old-new" / filename)
-            for role, filename in {
-                "train": "train.json",
-                "test": "test.json",
-                "metadata": "metadata.json",
-            }.items()
+        "experiment": {
+            "id": "base",
+            "output_root": str(tmp_path / "outputs"),
         },
-        "calibration": {
-            "output_root": str(tmp_path / "calibration" / "sst2" / "old-new")
+        "dataset": {
+            "id": "sst2",
+            "evaluation": {
+                "manifest": str(tmp_path / "sample_sets" / "sst2" / "test.json")
+            },
         },
+        "models": {
+            "id": "old-new",
+            "old": {"name_or_path": "old"},
+            "new": {"name_or_path": "new"},
+        },
+        "calibration": {"enabled": False},
     }
     artifacts.validate_artifact_namespaces(config, ROOT)
     assert artifacts.run_directory(config, ROOT, "base") == (
@@ -723,25 +773,38 @@ def test_model_pair_namespace_and_run_directory_are_mandatory(tmp_path):
         artifacts.validate_artifact_namespaces(config, ROOT)
 
 
-def test_manifest_identity_rejects_another_model_pair_before_attack(tmp_path):
+def test_manifest_identity_rejects_another_dataset_before_attack(tmp_path):
     config = {
         "dataset": {"id": "sst2"},
-        "models": {"id": "pair-a", "old": "old", "new": "new"},
+        "models": {
+            "id": "pair-a",
+            "old": {"name_or_path": "old"},
+            "new": {"name_or_path": "new"},
+        },
     }
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
         json.dumps(
             {
-                "dataset_id": "sst2",
-                "model_pair_id": "pair-b",
+                "schema_version": 2,
+                "dataset_id": "rte",
+                "dataset_fingerprint": "fingerprint",
+                "dataset_revision": None,
                 "split": "test",
-                "old_model_id": "old",
-                "new_model_id": "new",
+                "population_size": 1,
+                "requested_sample_size": None,
+                "effective_sample_size": 1,
+                "seed": 765,
+                "sampling_algorithm": "all_v1",
+                "selected_indices": [0],
+                "selection_sha256": manifests.selection_hash(
+                    "rte", "fingerprint", "test", 765, [0]
+                ),
             }
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="model pair"):
+    with pytest.raises(ValueError, match="dataset split"):
         artifacts.validate_manifest_identity(manifest, config, "test", ROOT)
 
 
@@ -749,27 +812,17 @@ def test_manifest_artifacts_are_immutable_after_creation(tmp_path):
     first = tmp_path / "train_manifest.json"
     second = tmp_path / "test_manifest.json"
     manifest_preparation._write_frozen_payloads(
-        [(first, {"model_pair_id": "pair-a"}), (second, {"split": "test"})]
+        [(first, {"dataset_id": "sst2"}), (second, {"split": "test"})]
     )
     # Reusing byte-semantically identical artifacts is an idempotent operation.
     manifest_preparation._write_frozen_payloads(
-        [(first, {"model_pair_id": "pair-a"}), (second, {"split": "test"})]
+        [(first, {"dataset_id": "sst2"}), (second, {"split": "test"})]
     )
     with pytest.raises(FileExistsError, match="Refusing to overwrite"):
         manifest_preparation._write_frozen_payloads(
-            [(first, {"model_pair_id": "pair-b"}), (second, {"split": "test"})]
+            [(first, {"dataset_id": "rte"}), (second, {"split": "test"})]
         )
-    assert json.loads(first.read_text(encoding="utf-8"))["model_pair_id"] == (
-        "pair-a"
-    )
-
-    metadata = tmp_path / "manifest_metadata.json"
-    metadata.write_text(
-        json.dumps({"generation_config_sha256": "hash-a"}), encoding="utf-8"
-    )
-    manifest_preparation._validate_existing_generation(metadata, "hash-a")
-    with pytest.raises(FileExistsError, match="generation settings changed"):
-        manifest_preparation._validate_existing_generation(metadata, "hash-b")
+    assert json.loads(first.read_text(encoding="utf-8"))["dataset_id"] == "sst2"
 
 
 def test_stratified_1000_and_frozen_800_200_are_deterministic():
@@ -835,22 +888,22 @@ def test_threshold_search_fails_without_feasible_acceptance():
 
 def test_qps_uses_every_manifest_sample_query():
     records = [
-        {"success": True, "model_pair_queries": 10, "modification_rate": 0.2},
-        {"success": False, "model_pair_queries": 1000, "modification_rate": 0},
-        {"success": True, "model_pair_queries": 20, "modification_rate": 0.4},
+        {"result_status": "successful", "model_pair_queries": 10, "modification_rate": 0.2},
+        {"result_status": "failed", "model_pair_queries": 1000, "modification_rate": 0},
+        {"result_status": "successful", "model_pair_queries": 20, "modification_rate": 0.4},
     ]
-    result = metrics.calculate_differential_metrics(
-        records, sample_count=3, eligible_count=3, test_split_size=10
-    )
+    result = metrics.calculate_differential_metrics(records, sample_count=3)
     assert result["model_pair_qps"] == 515
-    assert result["perturbation_induced_gsr"] == pytest.approx(2 / 3)
+    assert result["paper_gsr"] == pytest.approx(2 / 3)
+    assert result["successful"] == 2
+    assert result["failed"] == 1
+    assert result["skipped"] == 0
     assert result["amr"] == pytest.approx(0.3)
-    assert result["eligibility_rate"] == 0.3
 
 
 def test_zero_success_qps_is_json_null_value():
     result = metrics.calculate_differential_metrics(
-        [{"success": False, "model_pair_queries": 9, "modification_rate": 0}],
+        [{"result_status": "skipped", "model_pair_queries": 9, "modification_rate": 0}],
         sample_count=1,
     )
     assert result["model_pair_qps"] is None
@@ -967,6 +1020,7 @@ def test_secret_pattern_and_example_are_safe():
         encoding="utf-8"
     )
     assert "**.secert.yaml" in gitignore
+    assert "**.secret.yaml" in gitignore
     assert "replace-me" in example
     assert "deepseek-v4-pro" in example
 
@@ -1119,18 +1173,112 @@ def test_human_sampling_minimums_and_weighted_estimators():
     assert estimates["SemDT"]["valid_gsr"] == pytest.approx(0.2)
 
 
-def test_equivalence_report_uses_one_point_and_five_percent_rules():
-    base = {
-        "perturbation_induced_gsr": 0.50,
-        "amr": 0.20,
-        "model_pair_qps": 100,
+def test_core_metrics_preserve_curve_data_without_cross_run_comparison():
+    manifest = {
+        "effective_sample_size": 3,
+        "selected_indices": [3, 5, 8],
     }
-    current = {
-        "perturbation_induced_gsr": 0.509,
-        "amr": 0.21,
-        "model_pair_qps": 105,
+    records = [
+        {
+            "dataset_index": 3,
+            "result_status": "successful",
+            "initial_state": "both_correct",
+            "model_pair_queries": 10,
+            "queries_to_success": 10,
+            "modification_rate": 0.2,
+        },
+        {
+            "dataset_index": 5,
+            "result_status": "failed",
+            "initial_state": "both_wrong",
+            "model_pair_queries": 1000,
+            "queries_to_success": None,
+            "modification_rate": 0.0,
+        },
+        {
+            "dataset_index": 8,
+            "result_status": "skipped",
+            "initial_state": "already_differential",
+            "model_pair_queries": 1,
+            "queries_to_success": None,
+            "modification_rate": 0.0,
+        },
+    ]
+    result = evaluation.core_metrics(
+        records,
+        manifest,
+        success_budgets=[100, 500, 1000],
+        query_budget=1000,
+    )
+    assert (result["successful"], result["failed"], result["skipped"]) == (1, 1, 1)
+    assert result["paper_gsr"] == 0.5
+    assert result["sample_generation_rate"] == pytest.approx(1 / 3)
+    assert result["model_pair_qps"] == 1011
+    assert result["success_query_data"] == [
+        {"dataset_index": 3, "queries_to_success": 10}
+    ]
+    assert "comparison_to_base" not in result
+
+
+def test_missing_local_bertscore_model_is_an_isolated_quality_failure(tmp_path):
+    records = [
+        {
+            "result_status": "successful",
+            "original_input": {"sentence": "a good film"},
+            "candidate_input": {"sentence": "a fine film"},
+        }
+    ]
+    quality = {
+        "bleu": {"enabled": False},
+        "meteor": {"enabled": False},
+        "rouge_l": {"enabled": False},
+        "bertscore": {
+            "enabled": True,
+            "model_name_or_path": str(tmp_path / "missing-model"),
+            "num_layers": 17,
+            "allow_remote_download": False,
+            "device": "cpu",
+            "batch_size": 2,
+            "idf": False,
+            "rescale_with_baseline": False,
+            "baseline_path": None,
+        },
     }
-    comparison = evaluation.compare_to_base(current, base)
-    assert comparison["gsr_equivalent_within_1pp"]
-    assert comparison["amr_not_worse_than_5pct"]
-    assert comparison["model_pair_qps_not_worse_than_5pct"]
+    summary = evaluation.run_quality_metrics(
+        records, quality, tmp_path / "metrics", ROOT
+    )
+    assert summary["status"] == "failed"
+    assert summary["metrics"]["bertscore"] == "failed"
+    assert (tmp_path / "metrics/bertscore.json").is_file()
+
+
+def test_manual_metric_retry_updates_only_its_stage_status(tmp_path):
+    status_path = tmp_path / "status.json"
+    status_path.write_text(
+        json.dumps({"attack": {"status": "completed"}}), encoding="utf-8"
+    )
+    evaluation._update_stage_status(
+        status_path, "quality_evaluation", "completed"
+    )
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["attack"]["status"] == "completed"
+    assert status["quality_evaluation"]["status"] == "completed"
+
+
+def test_attack_summary_persists_all_three_result_counts(tmp_path):
+    summary_path = tmp_path / "attack_summary.json"
+    summary_path.write_text(json.dumps({"Attack Results": {}}), encoding="utf-8")
+    records = [
+        {"result_status": "successful"},
+        {"result_status": "failed"},
+        {"result_status": "skipped"},
+        {"result_status": "failed"},
+    ]
+    experiment_runner._augment_attack_summary(summary_path, records)
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["result_counts"] == {
+        "total": 4,
+        "successful": 1,
+        "failed": 2,
+        "skipped": 1,
+    }

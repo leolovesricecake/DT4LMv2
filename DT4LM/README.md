@@ -97,35 +97,32 @@ To conduct ablation study, replace the current goal function design with the nai
 ## SemDT and LexiDT Improvements
 
 The first-round workflow uses one shared `pair` recipe with orthogonal objective
-and semantic-constraint switches. Dataset hyperparameters and individual
-experiment definitions live in separate YAML files:
+and semantic-constraint switches. One self-contained YAML file defines each run:
 
 ```text
 --differential-objective dynamic|static|lexi
 --semantic-constraint original|nli
 ```
 
-Freeze the config-selected jointly-correct train/test manifests:
+Freeze the config-selected random test sample and optional calibration source:
 
 ```bash
 bash experiments/improvements/prepare_manifests.sh \
-  experiments/improvements/configs/sst2.yaml
+  experiments/improvements/configs/sst2/albertbasev1-v2-semdt-openai.yaml
 ```
 
 Run one selected judge backend at a time:
 
 ```bash
 bash experiments/improvements/calibrate_semdt.sh \
-  experiments/improvements/configs/sst2.yaml \
-  configs/openai.secert.yaml
+  experiments/improvements/configs/sst2/albertbasev1-v2-semdt-openai.yaml
 ```
 
 Run exactly one experiment at a time:
 
 ```bash
 bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/sst2.yaml \
-  experiments/improvements/configs/experiments/base.yaml
+  experiments/improvements/configs/sst2/albertbasev1-v2-base.yaml
 ```
 
 The complete Chinese guide, including model training, smoke-test

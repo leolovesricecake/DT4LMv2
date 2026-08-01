@@ -1,0 +1,1 @@
+textattack eval --num-examples -1 --model ../outputs/debertav1base_sst2/best_model/ --dataset-from-huggingface user_name/adversarial_dataset_generated_fastga --dataset-split train

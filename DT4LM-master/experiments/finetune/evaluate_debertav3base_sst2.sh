@@ -1,0 +1,1 @@
+textattack eval --num-examples -1 --model ./outputs/debertav3base_sst2/best_model/ --dataset-from-huggingface user_name/sst2 --dataset-split test --do-not-push
