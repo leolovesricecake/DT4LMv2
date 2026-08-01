@@ -93,23 +93,19 @@ class Attacker:
         observer = getattr(self.attack.goal_function, "candidate_observer", None)
         manifest = getattr(self.dataset, "manifest", None)
         if manifest is not None and self.attack.goal_function.model2 is not None:
-            self._validate_manifest_model_pair(manifest)
+            self._validate_dataset_model_labels()
         if observer is not None and manifest is not None:
-            # Candidate rows inherit immutable provenance from the exact train
-            # manifest used for calibration, not merely CLI display strings.
+            # The manifest contributes only dataset provenance. Model-pair
+            # identity remains sourced from the complete experiment arguments.
             observer.metadata.update(
                 {
                     "dataset": manifest.dataset_id,
                     "split": manifest.split,
                     "dataset_revision_or_fingerprint": (
-                        manifest.dataset_revision_or_fingerprint
+                        manifest.dataset_revision or manifest.dataset_fingerprint
                     ),
                     "manifest_seed": manifest.seed,
-                    "model_pair_id": manifest.model_pair_id,
-                    "new_model_id": manifest.new_model_id,
-                    "new_model_revision": manifest.new_model_revision,
-                    "old_model_id": manifest.old_model_id,
-                    "old_model_revision": manifest.old_model_revision,
+                    "manifest_selection_sha256": manifest.selection_sha256,
                 }
             )
 
@@ -128,51 +124,8 @@ class Attacker:
         # This is to be set if loading from a checkpoint
         self._checkpoint = None
 
-    def _validate_manifest_model_pair(self, manifest):
-        """Fail before queries if a frozen manifest targets other checkpoints."""
-
-        wrappers = (
-            ("new", self.attack.goal_function.model, manifest.new_model_id,
-             manifest.new_model_revision,
-             getattr(self.attack_args, "model_revision", None)),
-            ("old", self.attack.goal_function.model2, manifest.old_model_id,
-             manifest.old_model_revision,
-             getattr(self.attack_args, "second_model_revision", None)),
-        )
-        for (
-            role,
-            wrapper,
-            expected_id,
-            expected_revision,
-            configured_revision,
-        ) in wrappers:
-            config = getattr(wrapper.model, "config", None)
-            if config is None:
-                raise ValueError(f"The {role} model has no configuration metadata.")
-            actual_id = str(getattr(config, "_name_or_path", ""))
-            if os.path.exists(expected_id) or os.path.exists(actual_id):
-                expected_comparable = os.path.realpath(expected_id)
-                actual_comparable = os.path.realpath(actual_id)
-            else:
-                expected_comparable = expected_id
-                actual_comparable = actual_id
-            if actual_comparable and expected_comparable != actual_comparable:
-                raise ValueError(
-                    f"The {role} model does not match the frozen manifest: "
-                    f"{actual_comparable!r} != {expected_comparable!r}."
-                )
-            actual_revision = (
-                getattr(config, "_commit_hash", None)
-                or configured_revision
-                or actual_id
-            )
-            # Local checkpoints commonly identify their path as the revision;
-            # Hub checkpoints expose an immutable commit hash.
-            if expected_revision and actual_revision != expected_revision:
-                raise ValueError(
-                    f"The {role} model revision does not match the manifest: "
-                    f"{actual_revision!r} != {expected_revision!r}."
-                )
+    def _validate_dataset_model_labels(self):
+        """Fail before queries when dataset labels cannot map to model outputs."""
 
         label_names = getattr(self.dataset, "label_names", None)
         if label_names:

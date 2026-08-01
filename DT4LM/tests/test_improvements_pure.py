@@ -412,6 +412,22 @@ def test_package_sampling_adapter_exports_selection_helpers():
     )
 
 
+def test_attacker_does_not_bind_sample_manifest_to_a_model_pair():
+    """Prevent stale model fields from leaking back into dataset manifests."""
+
+    source = (ROOT / "textattack/attacker.py").read_text(encoding="utf-8")
+    for field in (
+        "model_pair_id",
+        "new_model_id",
+        "new_model_revision",
+        "old_model_id",
+        "old_model_revision",
+    ):
+        assert f"manifest.{field}" not in source
+    assert "manifest.dataset_revision or manifest.dataset_fingerprint" in source
+    assert '"manifest_selection_sha256": manifest.selection_sha256' in source
+
+
 def test_manifest_view_rejects_a_changed_dataset_fingerprint():
     manifest = manifests.SampleManifest(
         schema_version=2,
