@@ -18,16 +18,16 @@ dataset:
 
 models:
   # Stable namespace for every artifact produced by this ordered model pair.
-  id: albertbasev1-albertbasev2
+  id: albertbasev1-v2
   old: outputs/albertbasev1_sst2/best_model
   new: outputs/albertbasev2_sst2/best_model
   old_revision: null
   new_revision: null
 
 manifests:
-  train: outputs/dt4lm-improvements/manifests/sst2/albertbasev1-albertbasev2/train_manifest.json
-  test: outputs/dt4lm-improvements/manifests/sst2/albertbasev1-albertbasev2/test_manifest.json
-  metadata: outputs/dt4lm-improvements/manifests/sst2/albertbasev1-albertbasev2/manifest_metadata.json
+  train: outputs/dt4lm-improvements/manifests/sst2/albertbasev1-v2/train_manifest.json
+  test: outputs/dt4lm-improvements/manifests/sst2/albertbasev1-v2/test_manifest.json
+  metadata: outputs/dt4lm-improvements/manifests/sst2/albertbasev1-v2/manifest_metadata.json
 
 # Selection policies are hyperparameters; manifest generation never infers them
 # from the dataset name.
@@ -50,7 +50,7 @@ nli:
   truncation_strategy: longest_first
 
 calibration:
-  output_root: outputs/dt4lm-improvements/calibration/sst2/albertbasev1-albertbasev2
+  output_root: outputs/dt4lm-improvements/calibration/sst2/albertbasev1-v2
   # Base candidate collection axes are explicit and reproducible.
   candidate_collection:
     base_recipe: kuleshov_var
