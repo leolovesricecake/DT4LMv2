@@ -1,13 +1,12 @@
-# Complete RTE LexiDT run.
 schema_version: 2
 experiment:
-  id: rte-albertbasev1-v2-lexidt
-  method: lexidt
+  id: mr-albertbasev1-v2-base
+  method: base
   seed: 765
   output_root: outputs/dt4lm-improvements
 dataset:
-  id: rte
-  path: outputs/datasets/rte
+  id: mr
+  path: outputs/datasets/mr
   revision: null
   text_columns: [premise, hypothesis]
   label_column: label
@@ -16,14 +15,14 @@ dataset:
     split: test
     sample_size: 1000
     sample_seed: 765
-    manifest: outputs/dt4lm-improvements/sample_sets/rte/test-n1000-seed765.json
+    manifest: outputs/dt4lm-improvements/sample_sets/mr/test-n1000-seed765.json
 models:
   id: albertbasev1-v2
-  old: {name_or_path: outputs/finetuned/albertbasev1_rte/best_model, revision: null}
-  new: {name_or_path: outputs/finetuned/albertbasev2_rte/best_model, revision: null}
+  old: {name_or_path: outputs/finetuned/albertbasev1_mr/best_model, revision: null}
+  new: {name_or_path: outputs/finetuned/albertbasev2_mr/best_model, revision: null}
 attack:
   recipe: kuleshov_var
-  differential_objective: lexi
+  differential_objective: dynamic
   semantic_constraint: original
   query_budget: 1000
 semantic:

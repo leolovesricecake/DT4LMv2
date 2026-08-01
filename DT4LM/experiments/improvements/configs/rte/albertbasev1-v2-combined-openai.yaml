@@ -19,8 +19,8 @@ dataset:
     manifest: outputs/dt4lm-improvements/sample_sets/rte/test-n1000-seed765.json
 models:
   id: albertbasev1-v2
-  old: {name_or_path: outputs/albertbasev1_rte/best_model, revision: null}
-  new: {name_or_path: outputs/albertbasev2_rte/best_model, revision: null}
+  old: {name_or_path: outputs/finetuned/albertbasev1_rte/best_model, revision: null}
+  new: {name_or_path: outputs/finetuned/albertbasev2_rte/best_model, revision: null}
 attack:
   recipe: kuleshov_var
   differential_objective: lexi

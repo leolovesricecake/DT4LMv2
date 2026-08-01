@@ -60,22 +60,25 @@ python datasets/preprocess_dataset.py sst2 \
 
 ## 3. 准备新旧模型
 
-默认首轮模型为 ALBERT base v1/v2：
+格式：bash experiments/finetune/<file> <DATASET> <DEVICE>
+* DATASET: sst2 rte mrpc mr
+* DEVICE: 显卡号，-1=cpu
 
 ```bash
-bash experiments/finetune/train_albertbasev1_sst2.sh
-bash experiments/finetune/train_albertbasev2_sst2.sh
-bash experiments/finetune/train_albertbasev1_rte.sh
-bash experiments/finetune/train_albertbasev2_rte.sh
+bash experiments/finetune/train_albertbasev1.sh
+bash experiments/finetune/train_albertbasev2.sh
+
+bash experiments/finetune/train_debertav1base.sh
+bash experiments/finetune/train_debertav3base.sh
+
+bash experiments/finetune/train_gpt1.sh
+bash experiments/finetune/train_gpt2.sh
 ```
 
-默认 checkpoint：
+checkpoint：
 
 ```text
-outputs/albertbasev1_sst2/best_model
-outputs/albertbasev2_sst2/best_model
-outputs/albertbasev1_rte/best_model
-outputs/albertbasev2_rte/best_model
+outputs/finetuned/<model>_<dataset>/best_model
 ```
 
 已有 checkpoint 时可跳过训练，直接修改目标实验 YAML 中：
@@ -264,17 +267,17 @@ bash experiments/improvements/calibrate_semdt.sh \
 命令只接收一份完整配置：
 
 ```bash
-bash experiments/improvements/run_first_round.sh \
+CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-base.yaml
 ```
 
 其他方法独立运行，例如：
 
 ```bash
-bash experiments/improvements/run_first_round.sh \
+CUDA_VISIBLE_DEVICES=3 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-lexidt.yaml
 
-bash experiments/improvements/run_first_round.sh \
+CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-semdt-openai.yaml
 ```
 

@@ -20,10 +20,10 @@ dataset:
 models:
   id: albertbasev1-v2
   old:
-    name_or_path: outputs/albertbasev1_sst2/best_model
+    name_or_path: outputs/finetuned/albertbasev1_sst2/best_model
     revision: null
   new:
-    name_or_path: outputs/albertbasev2_sst2/best_model
+    name_or_path: outputs/finetuned/albertbasev2_sst2/best_model
     revision: null
 attack:
   recipe: kuleshov_var

@@ -19,8 +19,8 @@ dataset:
     manifest: outputs/dt4lm-improvements/sample_sets/sst2/test-n1000-seed765.json
 models:
   id: albertbasev1-v2
-  old: {name_or_path: outputs/albertbasev1_sst2/best_model, revision: null}
-  new: {name_or_path: outputs/albertbasev2_sst2/best_model, revision: null}
+  old: {name_or_path: outputs/finetuned/albertbasev1_sst2/best_model, revision: null}
+  new: {name_or_path: outputs/finetuned/albertbasev2_sst2/best_model, revision: null}
 attack:
   recipe: kuleshov_var
   differential_objective: dynamic
@@ -28,10 +28,10 @@ attack:
   query_budget: 1000
 semantic:
   nli:
-    model_name_or_path: FacebookAI/roberta-large-mnli
+    model_name_or_path: /mnt/huawei/nsq/models/FacebookAI/roberta-large-mnli
     revision: null
     tokenizer_revision: null
-    allow_remote_download: true
+    allow_remote_download: false
     device: null
     dtype: float32
     batch_size: 32
