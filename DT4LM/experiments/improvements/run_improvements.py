@@ -87,7 +87,7 @@ def _write_json_atomic(path, payload):
     os.replace(temporary, path)
 
 
-def _set_stage(status_path, stage, state, error=None):
+def _set_stage(status_path, stage, state, error=None, **details):
     """Update one independently recoverable pipeline stage."""
 
     if status_path.exists():
@@ -103,8 +103,156 @@ def _set_stage(status_path, stage, state, error=None):
     entry = {"status": state, "updated_at": datetime.now(timezone.utc).isoformat()}
     if error:
         entry["error"] = str(error)
+    entry.update(details)
     status[stage] = entry
     _write_json_atomic(status_path, status)
+
+
+def _read_json(path):
+    """Read one JSON artifact used by resume validation."""
+
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _attack_identity(config):
+    """Select config fields that must remain immutable after attack generation."""
+
+    experiment = config["experiment"]
+    return {
+        "schema_version": config["schema_version"],
+        "experiment": {
+            key: experiment[key] for key in ("id", "method", "seed")
+        },
+        "dataset": config["dataset"],
+        "models": config["models"],
+        "attack": config["attack"],
+        "semantic": config["semantic"],
+    }
+
+
+def _prepare_run_metadata(run_dir, config, manifest_path, manifest_payload):
+    """Create metadata once and reject incompatible attempts to reuse a run."""
+
+    resolved_config_path = run_dir / "config.resolved.yaml"
+    if resolved_config_path.exists():
+        with open(resolved_config_path, encoding="utf-8") as handle:
+            previous = yaml.safe_load(handle)
+        if _attack_identity(previous) != _attack_identity(config):
+            raise ValueError(
+                "Existing results use a different attack configuration. Change "
+                "experiment.id instead of resuming this run directory."
+            )
+
+    copied_manifest = run_dir / "sample_manifest.json"
+    if copied_manifest.exists() and _read_json(copied_manifest) != manifest_payload:
+        raise ValueError(
+            "Existing sample_manifest.json differs from the configured manifest; "
+            "the attack cannot be resumed safely."
+        )
+
+    # Evaluation settings may be corrected after attack completion, so refresh
+    # the resolved config while preserving all attack-defining fields above.
+    with open(resolved_config_path, "w", encoding="utf-8") as handle:
+        yaml.safe_dump(config, handle, allow_unicode=False, sort_keys=True)
+    if not copied_manifest.exists():
+        shutil.copy2(manifest_path, copied_manifest)
+    provenance_path = run_dir / "provenance.json"
+    if not provenance_path.exists():
+        _write_json_atomic(provenance_path, _environment(PROJECT_ROOT))
+    return resolved_config_path
+
+
+def _load_completed_results(run_dir, manifest):
+    """Require a complete ordered result artifact before skipping attack work."""
+
+    records = []
+    with open(run_dir / "results.jsonl", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                records.append(json.loads(line))
+    expected = [int(index) for index in manifest["selected_indices"]]
+    observed = [int(row.get("dataset_index", -1)) for row in records]
+    if len(records) != int(manifest["effective_sample_size"]) or observed != expected:
+        raise ValueError(
+            "Existing results.jsonl is incomplete or does not match manifest order; "
+            "use a new experiment.id rather than overwriting partial results."
+        )
+    invalid = [
+        row.get("result_status")
+        for row in records
+        if row.get("result_status") not in {"successful", "failed", "skipped"}
+    ]
+    if invalid:
+        raise ValueError(f"Existing results contain invalid statuses: {invalid!r}.")
+    return records
+
+
+def _load_schema_artifact(path):
+    """Return a metric artifact only when it is valid schema-v3 JSON."""
+
+    try:
+        payload = _read_json(path)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    return payload if payload.get("schema_version") == 3 else None
+
+
+def _core_evaluation_complete(run_dir, core_config, query_budget):
+    """Check both scalar and curve-data artifacts before skipping core metrics."""
+
+    if (run_dir / "metrics" / "resources.json").exists():
+        return False
+    core = _load_schema_artifact(run_dir / "metrics" / "core.json")
+    queries = _load_schema_artifact(run_dir / "metrics" / "success_queries.json")
+    if not core or not queries or not isinstance(core.get("resources"), dict):
+        return False
+    try:
+        actual_budgets = {
+            int(key.removeprefix("success_at_"))
+            for key in core
+            if key.startswith("success_at_")
+        }
+    except ValueError:
+        return False
+    expected_budgets = set(core_config["success_budgets"])
+    if core.get("query_budget") != query_budget or actual_budgets != expected_budgets:
+        return False
+    data = queries.get("data") or {}
+    indices = data.get("dataset_index")
+    values = data.get("queries_to_success")
+    expected = queries.get("successful_sample_count")
+    return (
+        isinstance(indices, list)
+        and isinstance(values, list)
+        and len(indices) == len(values) == expected == core.get("successful")
+    )
+
+
+def _quality_evaluation_complete(run_dir, quality_config):
+    """Retry quality evaluation until every enabled metric has completed."""
+
+    if any(
+        (run_dir / "metrics" / f"{name}.json").exists()
+        for name in ("bleu", "meteor", "rouge_l", "bertscore")
+    ):
+        return False
+    quality = _load_schema_artifact(run_dir / "metrics" / "quality.json")
+    core = _load_schema_artifact(run_dir / "metrics" / "core.json")
+    if (
+        not quality
+        or not core
+        or quality.get("status") != "completed"
+        or quality.get("successful_sample_count") != core.get("successful")
+    ):
+        return False
+    metrics = quality.get("metrics") or {}
+    for name, config in quality_config.items():
+        expected = "completed" if config["enabled"] else "disabled"
+        payload = metrics.get(name) or {}
+        if payload.get("status") != expected or payload.get("config") != config:
+            return False
+    return True
 
 
 def _append_option(command, option, value):
@@ -233,7 +381,10 @@ def _attack_command(config, run_dir, manifest, project_root):
         threshold = config["semantic"]["threshold"]
         if threshold["source"] == "calibrated":
             command.extend(
-                ["--semantic-threshold-file", str(_threshold_file(config, project_root))]
+                [
+                    "--semantic-threshold-file",
+                    str(_threshold_file(config, project_root)),
+                ]
             )
         elif threshold["source"] == "manual":
             command.extend(
@@ -337,7 +488,7 @@ def main():
             f"Test manifest does not exist: {manifest}. "
             "Run prepare_manifests.sh with this config first."
         )
-    validate_manifest_identity(
+    manifest_payload = validate_manifest_identity(
         manifest,
         config,
         split,
@@ -346,61 +497,73 @@ def main():
 
     run_dir = run_directory(config, PROJECT_ROOT)
     run_dir.mkdir(parents=True, exist_ok=True)
-    if (run_dir / "results.jsonl").exists():
-        raise FileExistsError(
-            f"{run_dir} already has results; change experiment.id or output_root."
-        )
-    resolved_config_path = run_dir / "config.resolved.yaml"
-    with open(resolved_config_path, "w", encoding="utf-8") as handle:
-        yaml.safe_dump(config, handle, allow_unicode=False, sort_keys=True)
-    _write_json_atomic(run_dir / "provenance.json", _environment(PROJECT_ROOT))
-    shutil.copy2(manifest, run_dir / "sample_manifest.json")
+    resolved_config_path = _prepare_run_metadata(
+        run_dir, config, manifest, manifest_payload
+    )
 
     status_path = run_dir / "status.json"
-    _set_stage(status_path, "attack", "running")
-    try:
-        subprocess.run(
-            _attack_command(config, run_dir, manifest, PROJECT_ROOT),
-            cwd=PROJECT_ROOT,
-            check=True,
-        )
-        records = _split_results(run_dir)
+    if (run_dir / "results.jsonl").exists():
+        records = _load_completed_results(run_dir, manifest_payload)
         _augment_attack_summary(run_dir / "attack_summary.json", records)
-        _set_stage(status_path, "attack", "completed")
-    except Exception as exc:
-        _set_stage(status_path, "attack", "failed", exc)
-        raise
-
-    _set_stage(status_path, "core_evaluation", "running")
-    try:
-        subprocess.run(
-            _evaluation_command(resolved_config_path, run_dir, "core"),
-            cwd=PROJECT_ROOT,
-            check=True,
-        )
-        _set_stage(status_path, "core_evaluation", "completed")
-    except Exception as exc:
-        _set_stage(status_path, "core_evaluation", "failed", exc)
-        raise
-
-    _set_stage(status_path, "quality_evaluation", "running")
-    quality_process = subprocess.run(
-        _evaluation_command(resolved_config_path, run_dir, "quality"),
-        cwd=PROJECT_ROOT,
-        check=False,
-    )
-    quality_summary = run_dir / "metrics" / "quality.json"
-    if quality_process.returncode != 0 or not quality_summary.exists():
-        _set_stage(
-            status_path,
-            "quality_evaluation",
-            "failed",
-            f"quality evaluator exited with code {quality_process.returncode}",
-        )
+        _set_stage(status_path, "attack", "completed", resumed=True)
     else:
-        with open(quality_summary, encoding="utf-8") as handle:
-            quality = json.load(handle)
-        _set_stage(status_path, "quality_evaluation", quality["status"])
+        _set_stage(status_path, "attack", "running")
+        try:
+            subprocess.run(
+                _attack_command(config, run_dir, manifest, PROJECT_ROOT),
+                cwd=PROJECT_ROOT,
+                check=True,
+            )
+            records = _split_results(run_dir)
+            _augment_attack_summary(run_dir / "attack_summary.json", records)
+            _set_stage(status_path, "attack", "completed", resumed=False)
+        except Exception as exc:
+            _set_stage(status_path, "attack", "failed", exc)
+            raise
+
+    core_config = config["evaluation"]["core"]
+    query_budget = config["attack"]["query_budget"]
+    if _core_evaluation_complete(run_dir, core_config, query_budget):
+        _set_stage(status_path, "core_evaluation", "completed", resumed=True)
+    else:
+        _set_stage(status_path, "core_evaluation", "running")
+        try:
+            subprocess.run(
+                _evaluation_command(resolved_config_path, run_dir, "core"),
+                cwd=PROJECT_ROOT,
+                check=True,
+            )
+            _set_stage(status_path, "core_evaluation", "completed", resumed=False)
+        except Exception as exc:
+            _set_stage(status_path, "core_evaluation", "failed", exc)
+            raise
+
+    quality_config = config["evaluation"]["quality"]
+    if _quality_evaluation_complete(run_dir, quality_config):
+        _set_stage(status_path, "quality_evaluation", "completed", resumed=True)
+    else:
+        _set_stage(status_path, "quality_evaluation", "running")
+        quality_process = subprocess.run(
+            _evaluation_command(resolved_config_path, run_dir, "quality"),
+            cwd=PROJECT_ROOT,
+            check=False,
+        )
+        quality_summary = run_dir / "metrics" / "quality.json"
+        if quality_process.returncode != 0 or not quality_summary.exists():
+            _set_stage(
+                status_path,
+                "quality_evaluation",
+                "failed",
+                f"quality evaluator exited with code {quality_process.returncode}",
+            )
+        else:
+            quality = _read_json(quality_summary)
+            _set_stage(
+                status_path,
+                "quality_evaluation",
+                quality["status"],
+                resumed=False,
+            )
 
 
 if __name__ == "__main__":

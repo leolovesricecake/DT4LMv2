@@ -5,11 +5,14 @@ import argparse
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version as package_version
 import json
 import os
 from pathlib import Path
 from statistics import mean, median, quantiles
 import sys
+
+from packaging.version import Version
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -21,9 +24,26 @@ from improvement_config import load_experiment_config  # noqa: E402
 
 
 RESULT_STATUSES = frozenset(("successful", "failed", "skipped"))
+METRICS_SCHEMA_VERSION = 3
 INITIAL_STATES = frozenset(
     ("both_correct", "new_correct_old_wrong", "both_wrong", "already_differential")
 )
+
+
+def evaluation_runtime():
+    """Capture the environment that produced a metric artifact."""
+
+    packages = {}
+    for package in ("torch", "transformers", "datasets", "bert-score"):
+        try:
+            packages[package] = package_version(package)
+        except PackageNotFoundError:
+            packages[package] = None
+    return {
+        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        "python": sys.version,
+        "packages": packages,
+    }
 
 
 def read_jsonl(path):
@@ -91,7 +111,7 @@ def _quartiles(values):
 
 
 def core_metrics(records, manifest, *, success_budgets, query_budget):
-    """Compute count, denominator, and query metrics from immutable records."""
+    """Compute core metrics and compact per-success query columns."""
 
     expected_indices = list(manifest["selected_indices"])
     observed_indices = [int(row["dataset_index"]) for row in records]
@@ -114,7 +134,9 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
     skipped_count = counts["skipped"]
     attackable_count = success_count + failed_count
     if total != success_count + failed_count + skipped_count:
-        raise ValueError("Result counts do not satisfy total=successful+failed+skipped.")
+        raise ValueError(
+            "Result counts do not satisfy total=successful+failed+skipped."
+        )
 
     initial_states = Counter()
     for row, status in zip(records, statuses):
@@ -127,7 +149,7 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
 
     total_queries = 0
     success_queries = []
-    success_query_data = []
+    success_query_columns = {"dataset_index": [], "queries_to_success": []}
     for row, status in zip(records, statuses):
         queries = int(row["model_pair_queries"])
         if queries <= 0:
@@ -138,20 +160,28 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
             if not isinstance(query_to_success, int) or query_to_success <= 0:
                 raise ValueError("Successful rows require positive queries_to_success.")
             if query_to_success > queries or query_to_success > query_budget:
-                raise ValueError("queries_to_success exceeds recorded queries or budget.")
+                raise ValueError(
+                    "queries_to_success exceeds recorded queries or budget."
+                )
             success_queries.append(query_to_success)
-            success_query_data.append(
-                {
-                    "dataset_index": int(row["dataset_index"]),
-                    "queries_to_success": query_to_success,
-                }
+            # Columnar storage avoids repeating field names for every success.
+            success_query_columns["dataset_index"].append(
+                int(row["dataset_index"])
             )
+            success_query_columns["queries_to_success"].append(query_to_success)
         elif query_to_success is not None:
             raise ValueError("Failed and skipped rows require null queries_to_success.")
 
     q1, q3 = _quartiles(success_queries)
+    successful_nli = [
+        row["nli"]
+        for row in successful
+        if isinstance(row.get("nli"), dict)
+        and row["nli"].get("entailment_score") is not None
+        and row["nli"].get("contradiction_score") is not None
+    ]
     result = {
-        "schema_version": 2,
+        "schema_version": METRICS_SCHEMA_VERSION,
         "total": total,
         "successful": success_count,
         "failed": failed_count,
@@ -173,10 +203,27 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
             if successful
             else None
         ),
+        "successful_nli_sample_count": len(successful_nli),
+        "successful_nli_entailment_mean": (
+            mean(float(item["entailment_score"]) for item in successful_nli)
+            if successful_nli
+            else None
+        ),
+        "successful_nli_contradiction_mean": (
+            mean(float(item["contradiction_score"]) for item in successful_nli)
+            if successful_nli
+            else None
+        ),
+        "successful_nli_acceptance_rate": (
+            mean(bool(item.get("accepted")) for item in successful_nli)
+            if successful_nli
+            else None
+        ),
         "query_budget": int(query_budget),
-        "success_query_data": success_query_data,
-        "successful_query_counts": success_queries,
-        "successful_queries_median": median(success_queries) if success_queries else None,
+        "successful_query_count": len(success_queries),
+        "successful_queries_median": (
+            median(success_queries) if success_queries else None
+        ),
         "successful_queries_q1": q1,
         "successful_queries_q3": q3,
     }
@@ -194,7 +241,12 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
         if attackable_count
         else None
     )
-    return result
+    success_query_artifact = {
+        "schema_version": METRICS_SCHEMA_VERSION,
+        "successful_sample_count": len(success_queries),
+        "data": success_query_columns,
+    }
+    return result, success_query_artifact
 
 
 def _lcs_length(left, right):
@@ -263,8 +315,53 @@ def _metric_payload(config, function):
         }
 
 
+def _local_model_weight_format(model_path, torch_version=None):
+    """Validate local model weights against Transformers' secure-load policy."""
+
+    model_path = Path(model_path)
+    if not model_path.is_dir():
+        raise FileNotFoundError(
+            f"BERTScore local model directory does not exist: {model_path}."
+        )
+
+    # Transformers prefers safetensors when either a monolithic or sharded
+    # checkpoint is present, so no pickle security gate is involved.
+    safe_weights = list(model_path.glob("*.safetensors"))
+    safe_index = model_path / "model.safetensors.index.json"
+    if safe_weights or safe_index.is_file():
+        return "safetensors"
+
+    pickle_weights = list(model_path.glob("pytorch_model*.bin"))
+    pickle_index = model_path / "pytorch_model.bin.index.json"
+    if pickle_weights or pickle_index.is_file():
+        installed = torch_version
+        if installed is None:
+            try:
+                installed = package_version("torch")
+            except PackageNotFoundError as exc:
+                raise RuntimeError(
+                    "BERTScore found pickle .bin weights, but torch is not installed."
+                ) from exc
+        if Version(installed) < Version("2.6.0"):
+            raise RuntimeError(
+                "BERTScore model uses pickle .bin weights, but Transformers blocks "
+                f"torch.load with torch {installed} because of CVE-2025-32434. "
+                "Upgrade to torch>=2.6 (CUDA 11.8: pip install torch==2.6.0 "
+                "torchvision==0.21.0 torchaudio==2.6.0 --index-url "
+                "https://download.pytorch.org/whl/cu118), or configure an "
+                "equivalent checkpoint containing model.safetensors. Do not "
+                "disable or patch around the Transformers security check."
+            )
+        return "pytorch_bin"
+
+    raise FileNotFoundError(
+        "BERTScore local model has no *.safetensors or pytorch_model*.bin weights: "
+        f"{model_path}."
+    )
+
+
 def run_quality_metrics(records, quality_config, output_dir, project_root):
-    """Run and persist quality metrics independently on successful generations."""
+    """Persist all independently evaluated quality metrics in one artifact."""
 
     successful = [row for row in records if _record_status(row) == "successful"]
     references = [flatten_fields(row["original_input"]) for row in successful]
@@ -310,6 +407,9 @@ def run_quality_metrics(records, quality_config, output_dir, project_root):
                 "BERTScore local model does not exist while remote downloads are "
                 f"disabled: {model}."
             )
+        weight_format = None
+        if Path(model).exists():
+            weight_format = _local_model_weight_format(model)
         from bert_score import score
 
         kwargs = {
@@ -336,6 +436,7 @@ def run_quality_metrics(records, quality_config, output_dir, project_root):
             "recall": float(recall.mean()),
             "f1": float(f1.mean()),
             "sample_count": len(successful),
+            "model_weight_format": weight_format,
         }
 
     calculators = {
@@ -345,17 +446,52 @@ def run_quality_metrics(records, quality_config, output_dir, project_root):
         "bertscore": lambda: empty_or(bertscore),
     }
     output_dir = Path(output_dir)
+    quality_path = output_dir / "quality.json"
+    previous_metrics = {}
+    if quality_path.exists():
+        try:
+            with open(quality_path, encoding="utf-8") as handle:
+                previous = json.load(handle)
+            if (
+                previous.get("schema_version") == METRICS_SCHEMA_VERSION
+                and previous.get("successful_sample_count") == len(successful)
+            ):
+                previous_metrics = previous.get("metrics") or {}
+        except (json.JSONDecodeError, OSError):
+            previous_metrics = {}
+
     results = {}
     for name, calculate in calculators.items():
-        payload = _metric_payload(quality_config[name], calculate)
-        _write_json_atomic(output_dir / f"{name}.json", payload)
-        results[name] = payload["status"]
+        prior = previous_metrics.get(name) or {}
+        expected_status = (
+            "completed" if quality_config[name]["enabled"] else "disabled"
+        )
+        # A completed metric with identical config is a valid quality checkpoint.
+        if (
+            prior.get("status") == expected_status
+            and prior.get("config") == quality_config[name]
+        ):
+            payload = prior
+        else:
+            payload = _metric_payload(quality_config[name], calculate)
+        results[name] = payload
     summary = {
-        "status": "failed" if "failed" in results.values() else "completed",
+        "schema_version": METRICS_SCHEMA_VERSION,
+        "status": (
+            "failed"
+            if any(item["status"] == "failed" for item in results.values())
+            else "completed"
+        ),
         "metrics": results,
         "successful_sample_count": len(successful),
+        "evaluation_runtime": evaluation_runtime(),
     }
-    _write_json_atomic(output_dir / "quality.json", summary)
+    _write_json_atomic(quality_path, summary)
+    # Remove schema-v2 files only after the consolidated artifact is durable.
+    for name in calculators:
+        legacy_path = output_dir / f"{name}.json"
+        if legacy_path.exists():
+            legacy_path.unlink()
     return summary
 
 
@@ -387,7 +523,7 @@ def run_core(args, config, records):
     with open(args.manifest, encoding="utf-8") as handle:
         manifest = json.load(handle)
     core_config = config["evaluation"]["core"]
-    core = core_metrics(
+    core, success_queries = core_metrics(
         records,
         manifest,
         success_budgets=core_config["success_budgets"],
@@ -397,9 +533,14 @@ def run_core(args, config, records):
     if args.nli_profile and Path(args.nli_profile).exists():
         with open(args.nli_profile, encoding="utf-8") as handle:
             profile = json.load(handle)
+    core["resources"] = resource_metrics(records, profile)
+    core["evaluation_runtime"] = evaluation_runtime()
     output_dir = Path(args.output_dir)
     _write_json_atomic(output_dir / "core.json", core)
-    _write_json_atomic(output_dir / "resources.json", resource_metrics(records, profile))
+    _write_json_atomic(output_dir / "success_queries.json", success_queries)
+    legacy_resources = output_dir / "resources.json"
+    if legacy_resources.exists():
+        legacy_resources.unlink()
 
 
 def main():

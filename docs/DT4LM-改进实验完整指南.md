@@ -13,6 +13,9 @@ cd DT4LM
 ```bash
 conda env create -f DT4LM.yaml
 conda activate DT4LM
+# Transformers 4.57 会安全地拒绝 torch<2.6 加载 pickle .bin 权重。
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
+  --index-url https://download.pytorch.org/whl/cu118
 pip install -e .
 ```
 
@@ -21,6 +24,7 @@ pip install -e .
 ```bash
 python -m textattack --help
 python -m textattack semdt-calibrate --help
+python -c "import torch; assert tuple(map(int, torch.__version__.split('+')[0].split('.')[:2])) >= (2, 6)"
 ```
 
 OpenAI-compatible judge 需要 `openai`；本地 HF judge 需要足够显存。BLEU 和
@@ -194,6 +198,19 @@ evaluation:
 `allow_remote_download: false` 时不会隐式下载。暂时不计算 BERTScore 时，应在
 该实验 YAML 中设置 `enabled: false`，而不是依赖命令行临时开关。
 
+本地目录还必须满足以下二者之一：
+
+- 包含 `model.safetensors` 或分片 `*.safetensors`，Transformers 会优先使用；
+- 只有 `pytorch_model.bin` 时，运行环境必须使用 `torch>=2.6`。
+
+`torch<2.6` 加载 `.bin` 会因 CVE-2025-32434 被新版 Transformers 拒绝。不要
+降级 Transformers 或修改其安全检查；使用上面的官方 PyTorch 2.6 CUDA 11.8
+安装命令，或把配置指向具有 safetensors 权重的等价 checkpoint。评估器会在
+加载 BERTScore 模型前检查这一点，并把明确的修复说明写入 `quality.json`。
+依据可查阅 [CVE 公告](https://github.com/advisories/GHSA-53q9-r3pm-6pq6)、
+[Transformers 安全说明](https://github.com/huggingface/transformers/security) 和
+[PyTorch 历史版本安装命令](https://docs.pytorch.org/get-started/previous-versions/)。
+
 ## 5. 生成随机样本 manifest
 
 Base、Static 和 LexiDT 配置只生成 test manifest：
@@ -312,12 +329,8 @@ outputs/dt4lm-improvements/runs/<dataset>/<models.id>/<experiment.id>/
   attack_summary.json
   metrics/
     core.json
-    resources.json
+    success_queries.json
     quality.json
-    bleu.json
-    meteor.json
-    rouge_l.json
-    bertscore.json
   successful_examples/
   failed_examples/
   skipped_examples/
@@ -336,18 +349,48 @@ outputs/dt4lm-improvements/runs/<dataset>/<models.id>/<experiment.id>/
 - 成功样本的 `queries_to_success`；
 - 修改率、耗时、显存与可选 NLI 诊断。
 
-核心指标包括 PaperGSR、完整样本生成率、Success@100/500/1000、SQ-AUC、AMR、
-QPS、状态分布和 success-query 原始数据。本轮不绘制 success-query curve；以后
-可直接使用 `results.jsonl` 和 `core.json` 中的逐样本成功查询数绘图。
+`core.json` 包含 PaperGSR、完整样本生成率、Success@100/500/1000、SQ-AUC、
+AMR、QPS、状态分布及 `resources`。`success_queries.json` 以等长的
+`data.dataset_index` 和 `data.queries_to_success` 两列保存曲线原始数据，避免
+`List[Dict]` 重复键名。本轮不绘制 success-query curve；以后可直接读取该文件。
+
+四项质量指标集中在 `quality.json.metrics`，每项独立保存 `status`、配置、值或
+错误。v2 的 `resources.json` 和四个单独质量文件不再生成。
 
 QPS 口径为全部 manifest 样本产生的模型对查询总数除以成功生成数，失败和
 skipped 的查询也进入分子；成功数为 0 时为 `null`。
 
-## 10. 质量指标失败后的处理
+## 10. 断点恢复、指标重算与结果整理
+
+### 10.1 重新执行同一实验
+
+再次执行同一份完整配置时，运行器会验证已有 `results.jsonl` 的样本数量、
+manifest 顺序与三类状态。验证通过后跳过攻击，仅补算缺失、旧 schema 或失败的
+指标；已有 v3 完成指标也会作为 checkpoint 复用。攻击相关配置改变时不会错误
+复用旧结果，而会要求使用新的 `experiment.id`。
+
+```bash
+CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
+  experiments/improvements/configs/sst2/albertbasev1-v2-base.yaml
+```
+
+### 10.2 批量重算已拉取实验
 
 `status.json` 分别记录 attack、core 和 quality 状态。BERTScore 或 NLTK 指标
-失败不会删除攻击结果，也不会使 `core.json` 失效。修正配置或本地依赖后，可
-独立重跑质量评估：
+失败不会删除攻击结果。升级 PyTorch 或准备 safetensors 模型后，可以删除旧
+metrics 并批量重算；脚本会直接使用每个 run 内冻结的配置和 manifest：
+
+```bash
+RUN_ROOT=output/dt4lm-improvements/run
+find "$RUN_ROOT" -type d -name metrics -prune -exec rm -rf {} +
+CUDA_VISIBLE_DEVICES=1 python statistics/recompute_metrics.py --i "$RUN_ROOT"
+```
+
+不删除 metrics 也可以执行同一命令：完整 v3 质量子指标会复用，失败项会重试。
+脚本逐一处理全部 run，最后集中报告失败项。只重算某一阶段可加
+`--stage core` 或 `--stage quality`。
+
+单个 run 也可以独立重跑质量评估：
 
 ```bash
 python statistics/evaluate_improvements.py \
@@ -358,6 +401,28 @@ python statistics/evaluate_improvements.py \
   --output-dir <run-dir>/metrics \
   --status-file <run-dir>/status.json
 ```
+
+### 10.3 汇总论文表格
+
+指标全部完成后执行：
+
+```bash
+python statistics/aggregate_improvements.py
+```
+
+默认读取 `output/dt4lm-improvements/run`，并生成其中的 `summary.csv`。自定义
+输入目录和文件名：
+
+```bash
+python statistics/aggregate_improvements.py \
+  --i outputs/dt4lm-improvements/runs \
+  --o first-round.csv
+```
+
+CSV 每个 run 一行，包含 dataset、model pair、method、seed，N/A/S/F/K、论文
+核心指标、四项质量指标、资源与 NLI 诊断、模型/config/manifest 身份、运行状态
+及关键依赖版本。整理器不计算相对 Base 指标；人工评估与标定报告仍使用各自的
+专用分析脚本。
 
 ## 11. 轨迹审计
 
@@ -441,6 +506,9 @@ CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
 - `results.jsonl` 的索引和顺序与 manifest 完全一致；
 - `queries_to_success` 只出现在成功记录中且不超过查询预算；
 - BERTScore 使用真实本地路径，禁止下载时不会访问远端；
+- `.bin` BERTScore checkpoint 使用 `torch>=2.6`，或直接使用 safetensors；
 - 质量指标失败后攻击与核心产物仍可用；
+- v3 metrics 仅有 `core.json`、`success_queries.json` 和 `quality.json`；
+- `statistics/aggregate_improvements.py` 能生成每个 run 一行的汇总 CSV；
 - 单 run 产物中没有 Base 路径、相对差值或扩展决策；
 - Git 状态中不存在 secret 配置或 API key。

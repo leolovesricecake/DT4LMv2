@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from enum import Enum
+import csv
 import importlib.util
 import json
 from collections import OrderedDict
@@ -95,6 +96,14 @@ human_analysis = _load(
 evaluation = _load(
     "dt4lm_statistics.evaluate_improvements",
     "statistics/evaluate_improvements.py",
+)
+aggregation = _load(
+    "dt4lm_statistics.aggregate_improvements",
+    "statistics/aggregate_improvements.py",
+)
+metric_recomputation = _load(
+    "dt4lm_statistics.recompute_metrics",
+    "statistics/recompute_metrics.py",
 )
 artifacts = _load(
     "dt4lm_artifacts",
@@ -1358,7 +1367,7 @@ def test_core_metrics_preserve_curve_data_without_cross_run_comparison():
             "modification_rate": 0.0,
         },
     ]
-    result = evaluation.core_metrics(
+    result, success_queries = evaluation.core_metrics(
         records,
         manifest,
         success_budgets=[100, 500, 1000],
@@ -1368,9 +1377,12 @@ def test_core_metrics_preserve_curve_data_without_cross_run_comparison():
     assert result["paper_gsr"] == 0.5
     assert result["sample_generation_rate"] == pytest.approx(1 / 3)
     assert result["model_pair_qps"] == 1011
-    assert result["success_query_data"] == [
-        {"dataset_index": 3, "queries_to_success": 10}
-    ]
+    assert "success_query_data" not in result
+    assert "successful_query_counts" not in result
+    assert success_queries["data"] == {
+        "dataset_index": [3],
+        "queries_to_success": [10],
+    }
     assert "comparison_to_base" not in result
 
 
@@ -1402,8 +1414,256 @@ def test_missing_local_bertscore_model_is_an_isolated_quality_failure(tmp_path):
         records, quality, tmp_path / "metrics", ROOT
     )
     assert summary["status"] == "failed"
-    assert summary["metrics"]["bertscore"] == "failed"
-    assert (tmp_path / "metrics/bertscore.json").is_file()
+    assert summary["metrics"]["bertscore"]["status"] == "failed"
+    assert not (tmp_path / "metrics/bertscore.json").exists()
+    persisted = json.loads(
+        (tmp_path / "metrics/quality.json").read_text(encoding="utf-8")
+    )
+    assert set(persisted["metrics"]) == {
+        "bleu",
+        "meteor",
+        "rouge_l",
+        "bertscore",
+    }
+
+
+def test_bertscore_preflight_requires_secure_pickle_loading(tmp_path):
+    model = tmp_path / "deberta"
+    model.mkdir()
+    (model / "pytorch_model.bin").write_bytes(b"not-loaded-by-this-test")
+    with pytest.raises(RuntimeError, match="CVE-2025-32434"):
+        evaluation._local_model_weight_format(model, "2.4.1+cu118")
+    assert evaluation._local_model_weight_format(model, "2.6.0+cu118") == "pytorch_bin"
+
+    (model / "model.safetensors").write_bytes(b"not-loaded-by-this-test")
+    assert evaluation._local_model_weight_format(model, "2.4.1+cu118") == "safetensors"
+
+
+def test_quality_retry_reuses_completed_metrics_and_retries_failure(tmp_path):
+    records = [
+        {
+            "result_status": "successful",
+            "original_input": {"sentence": "original"},
+            "candidate_input": {"sentence": "candidate"},
+        }
+    ]
+    quality = {
+        "bleu": {"enabled": True},
+        "meteor": {"enabled": True},
+        "rouge_l": {"enabled": True},
+        "bertscore": {
+            "enabled": True,
+            "model_name_or_path": str(tmp_path / "missing-model"),
+            "num_layers": 17,
+            "allow_remote_download": False,
+            "device": "cpu",
+            "batch_size": 2,
+            "idf": False,
+            "rescale_with_baseline": False,
+            "baseline_path": None,
+        },
+    }
+    metrics_dir = tmp_path / "metrics"
+    metrics_dir.mkdir()
+    completed = {
+        name: {
+            "status": "completed",
+            "config": quality[name],
+            "values": {"value": index, "sample_count": 1},
+        }
+        for index, name in enumerate(("bleu", "meteor", "rouge_l"), start=1)
+    }
+    prior = {
+        "schema_version": 3,
+        "status": "failed",
+        "successful_sample_count": 1,
+        "metrics": {
+            **completed,
+            "bertscore": {
+                "status": "failed",
+                "config": quality["bertscore"],
+                "values": None,
+            },
+        },
+    }
+    (metrics_dir / "quality.json").write_text(json.dumps(prior), encoding="utf-8")
+    retried = evaluation.run_quality_metrics(records, quality, metrics_dir, ROOT)
+    assert retried["metrics"]["bleu"]["values"]["value"] == 1
+    assert retried["metrics"]["meteor"]["values"]["value"] == 2
+    assert retried["metrics"]["rouge_l"]["values"]["value"] == 3
+    assert retried["metrics"]["bertscore"]["status"] == "failed"
+
+
+def test_runner_recognizes_complete_schema_v3_metric_checkpoints(tmp_path):
+    metrics = tmp_path / "metrics"
+    metrics.mkdir()
+    (metrics / "core.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "successful": 1,
+                "resources": {},
+                "query_budget": 1000,
+                "success_at_100": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (metrics / "success_queries.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "successful_sample_count": 1,
+                "data": {"dataset_index": [4], "queries_to_success": [9]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    quality_config = {
+        "bleu": {"enabled": True},
+        "meteor": {"enabled": False},
+        "rouge_l": {"enabled": False},
+        "bertscore": {"enabled": False},
+    }
+    (metrics / "quality.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "status": "completed",
+                "successful_sample_count": 1,
+                "metrics": {
+                    name: {
+                        "status": "completed" if config["enabled"] else "disabled",
+                        "config": config,
+                    }
+                    for name, config in quality_config.items()
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert experiment_runner._core_evaluation_complete(
+        tmp_path, {"success_budgets": [100]}, 1000
+    )
+    assert experiment_runner._quality_evaluation_complete(tmp_path, quality_config)
+
+
+def test_aggregate_improvements_writes_paper_metrics(tmp_path):
+    input_dir = tmp_path / "run"
+    run_dir = input_dir / "sst2" / "pair" / "experiment"
+    metrics = run_dir / "metrics"
+    metrics.mkdir(parents=True)
+    config = {
+        "experiment": {"id": "experiment", "method": "base", "seed": 765},
+        "dataset": {"id": "sst2"},
+        "models": {
+            "id": "pair",
+            "old": {"name_or_path": "old", "revision": None},
+            "new": {"name_or_path": "new", "revision": None},
+        },
+        "attack": {
+            "recipe": "kuleshov_var",
+            "differential_objective": "dynamic",
+            "semantic_constraint": "original",
+            "query_budget": 1000,
+        },
+        "semantic": {"threshold": {"source": "none"}},
+        "calibration": {"enabled": False},
+    }
+    (run_dir / "config.resolved.yaml").write_text(
+        __import__("yaml").safe_dump(config), encoding="utf-8"
+    )
+    core = {
+        "schema_version": 3,
+        "total": 2,
+        "attackable": 2,
+        "successful": 1,
+        "failed": 1,
+        "skipped": 0,
+        "query_budget": 1000,
+        "successful_query_count": 1,
+        "initial_state_counts": {
+            "both_correct": 2,
+            "new_correct_old_wrong": 0,
+            "both_wrong": 0,
+            "already_differential": 0,
+        },
+        "paper_gsr": 0.5,
+        "sample_generation_rate": 0.5,
+        "success_at_100": 0.5,
+        "model_pair_qps": 12,
+        "resources": {"end_to_end_seconds": 3.5, "peak_vram_bytes": 10},
+    }
+    quality = {
+        "schema_version": 3,
+        "status": "completed",
+        "successful_sample_count": 1,
+        "metrics": {
+            "bleu": {
+                "status": "completed",
+                "config": {"enabled": True},
+                "values": {"value": 0.8, "sample_count": 1},
+            },
+            "meteor": {"status": "disabled", "config": {"enabled": False}},
+            "rouge_l": {"status": "disabled", "config": {"enabled": False}},
+            "bertscore": {"status": "disabled", "config": {"enabled": False}},
+        },
+    }
+    success_queries = {
+        "schema_version": 3,
+        "successful_sample_count": 1,
+        "data": {"dataset_index": [7], "queries_to_success": [12]},
+    }
+    manifest = {
+        "effective_sample_size": 2,
+        "population_size": 100,
+        "seed": 765,
+        "split": "test",
+        "selection_sha256": "abc",
+        "selected_indices": [7, 8],
+    }
+    status = {
+        "attack": {"status": "completed"},
+        "core_evaluation": {"status": "completed"},
+    }
+    provenance = {
+        "git_commit": "deadbeef",
+        "packages": {"torch": "2.6.0", "transformers": "4.57.6"},
+        "gpus": ["GPU"],
+    }
+    for path, payload in (
+        (metrics / "core.json", core),
+        (metrics / "quality.json", quality),
+        (metrics / "success_queries.json", success_queries),
+        (run_dir / "sample_manifest.json", manifest),
+        (run_dir / "status.json", status),
+        (run_dir / "provenance.json", provenance),
+    ):
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    output = input_dir / "paper.csv"
+    assert aggregation.write_summary(input_dir, output) == 1
+    with open(output, encoding="utf-8", newline="") as handle:
+        row = next(csv.DictReader(handle))
+    assert (row["dataset"], row["model_pair"], row["method"], row["seed"]) == (
+        "sst2",
+        "pair",
+        "base",
+        "765",
+    )
+    assert row["paper_gsr"] == "0.5"
+    assert row["bleu"] == "0.8"
+    assert row["success_queries_file"].endswith("metrics/success_queries.json")
+
+
+def test_metric_recomputation_discovers_nested_runs(tmp_path):
+    first = tmp_path / "rte" / "pair" / "first"
+    second = tmp_path / "sst2" / "pair" / "second"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "config.resolved.yaml").write_text("experiment: {}", encoding="utf-8")
+    (second / "config.resolved.yaml").write_text("experiment: {}", encoding="utf-8")
+    assert metric_recomputation.discover_runs(tmp_path) == [first, second]
 
 
 def test_manual_metric_retry_updates_only_its_stage_status(tmp_path):

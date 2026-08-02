@@ -127,6 +127,14 @@ bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-base.yaml
 ```
 
+Recompute metrics for downloaded completed runs and aggregate one CSV:
+
+```bash
+python statistics/recompute_metrics.py --i output/dt4lm-improvements/run
+python statistics/aggregate_improvements.py \
+  --i output/dt4lm-improvements/run --o summary.csv
+```
+
 The complete Chinese guide, including model training, smoke-test
 hyperparameters, independent OpenAI/HF calibration, all experiment commands,
 trajectory audits, automatic metrics, and human evaluation, is

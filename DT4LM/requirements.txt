@@ -138,13 +138,13 @@ terminaltables==3.1.10
 threadpoolctl==3.6.0
 tokenizers==0.22.2
 toml==0.10.2
-torch==2.4.1+cu118
-torchaudio==2.4.1+cu118
-torchvision==0.19.1+cu118
+torch==2.6.0+cu118
+torchaudio==2.6.0+cu118
+torchvision==0.21.0+cu118
 tqdm==4.70.0
 transformer-smaller-training-vocab==0.4.2
 transformers==4.57.6
-triton==3.0.0
+triton==3.2.0
 typer==0.27.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
