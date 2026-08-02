@@ -9,7 +9,7 @@ import sys
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_INPUT = Path("output/dt4lm-improvements/run")
+DEFAULT_INPUT = Path("outputs/dt4lm-improvements/runs")
 
 
 def resolve_input(path):

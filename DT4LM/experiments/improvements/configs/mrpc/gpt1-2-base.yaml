@@ -1,26 +1,26 @@
-# Complete RTE Base run; RTE uses all rows when fewer than 1,000 are available.
+# Complete MRPC Base run; sentence pairs are symmetric paraphrase inputs.
 schema_version: 2
 experiment:
-  id: rte-albertbasev1-v2-base
+  id: mrpc-gpt1-2-base
   method: base
   seed: 765
   output_root: outputs/dt4lm-improvements
 dataset:
-  id: rte
-  path: outputs/datasets/rte
+  id: mrpc
+  path: outputs/datasets/mrpc
   revision: null
-  text_columns: [premise, hypothesis]
+  text_columns: [sentence1, sentence2]
   label_column: label
-  task_definition: Determine whether the premise entails the hypothesis.
+  task_definition: Determine whether sentence1 and sentence2 are semantically equivalent paraphrases.
   evaluation:
     split: test
     sample_size: 1000
     sample_seed: 765
-    manifest: outputs/dt4lm-improvements/sample_sets/rte/test-n1000-seed765.json
+    manifest: outputs/dt4lm-improvements/sample_sets/mrpc/test-n1000-seed765.json
 models:
   id: gpt1-2
-  old: {name_or_path: outputs/finetuned/albertbasev1_rte/best_model, revision: null}
-  new: {name_or_path: outputs/finetuned/albertbasev2_rte/best_model, revision: null}
+  old: {name_or_path: outputs/finetuned/gpt1_mrpc/best_model, revision: null}
+  new: {name_or_path: outputs/finetuned/gpt2_mrpc/best_model, revision: null}
 attack:
   recipe: kuleshov_var
   differential_objective: dynamic

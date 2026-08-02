@@ -1,7 +1,7 @@
 # Complete RTE Base run; RTE uses all rows when fewer than 1,000 are available.
 schema_version: 2
 experiment:
-  id: rte-albertbasev1-v2-base
+  id: rte-gpt1-2-base
   method: base
   seed: 765
   output_root: outputs/dt4lm-improvements
@@ -19,8 +19,8 @@ dataset:
     manifest: outputs/dt4lm-improvements/sample_sets/rte/test-n1000-seed765.json
 models:
   id: gpt1-2
-  old: {name_or_path: outputs/finetuned/albertbasev1_rte/best_model, revision: null}
-  new: {name_or_path: outputs/finetuned/albertbasev2_rte/best_model, revision: null}
+  old: {name_or_path: outputs/finetuned/gpt1_rte/best_model, revision: null}
+  new: {name_or_path: outputs/finetuned/gpt2_rte/best_model, revision: null}
 attack:
   recipe: kuleshov_var
   differential_objective: dynamic

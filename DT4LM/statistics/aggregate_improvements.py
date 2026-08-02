@@ -5,13 +5,14 @@ import argparse
 import csv
 import json
 import os
+import sys
 from pathlib import Path
 
 import yaml
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_INPUT = Path("output/dt4lm-improvements/run")
+DEFAULT_INPUT = Path("outputs/dt4lm-improvements/runs")
 DEFAULT_OUTPUT = "summary.csv"
 QUALITY_METRICS = ("bleu", "meteor", "rouge_l", "bertscore")
 
@@ -39,26 +40,14 @@ IDENTITY_COLUMNS = [
     "epsilon_initialization_max_expansions",
     "epsilon_decay",
     "infeasible_state_policy",
-    "semantic_constraint",
-    "threshold_source",
-    "threshold_backend",
-    "threshold_entailment",
-    "threshold_contradiction",
     "query_budget",
     "manifest_split",
-    "manifest_dataset_fingerprint",
-    "manifest_dataset_revision",
-    "manifest_sampling_algorithm",
-    "manifest_population_size",
-    "manifest_requested_sample_size",
     "manifest_sample_count",
     "manifest_seed",
-    "manifest_selection_sha256",
 ]
 
 CORE_COLUMNS = [
     "total",
-    "attackable",
     "successful",
     "failed",
     "skipped",
@@ -68,7 +57,6 @@ CORE_COLUMNS = [
     "initial_already_differential",
     "paper_gsr",
     "sample_generation_rate",
-    "preexisting_differential_rate",
     "success_at_100",
     "success_at_500",
     "success_at_1000",
@@ -109,10 +97,6 @@ CORE_COLUMNS = [
     "epsilon_zero_initialization_rate",
     "epsilon_to_root_margin_ratio_median",
     "epsilon_initialization_expansion_mean",
-    "successful_nli_sample_count",
-    "successful_nli_entailment_mean",
-    "successful_nli_contradiction_mean",
-    "successful_nli_acceptance_rate",
 ]
 
 QUALITY_COLUMNS = [
@@ -123,63 +107,19 @@ QUALITY_COLUMNS = [
     "bertscore_recall",
     "bertscore_f1",
     "quality_successful_sample_count",
-    "quality_bleu_status",
-    "quality_meteor_status",
-    "quality_rouge_l_status",
-    "quality_bertscore_status",
-    "quality_bertscore_model",
-    "quality_bertscore_num_layers",
-    "quality_bertscore_idf",
-    "quality_bertscore_rescale_with_baseline",
-    "quality_bertscore_weight_format",
-    "quality_bleu_error",
-    "quality_meteor_error",
-    "quality_rouge_l_error",
-    "quality_bertscore_error",
 ]
 
 RESOURCE_COLUMNS = [
     "end_to_end_seconds",
     "end_to_end_seconds_per_success",
     "peak_vram_bytes",
-    "nli_candidates",
-    "nli_directional_pairs",
-    "nli_logical_directional_pairs",
-    "nli_batches",
-    "nli_cache_hits",
-    "nli_cache_misses",
-    "nli_cache_hit_rate",
-    "nli_truncated_candidates",
-    "nli_truncated_candidate_rate",
-    "nli_truncated_directional_pairs",
-    "nli_truncated_directional_pair_rate",
-    "nli_inference_seconds",
-    "nli_seconds_per_candidate",
-    "nli_peak_vram_bytes",
 ]
 
 PROVENANCE_COLUMNS = [
-    "attack_status",
-    "core_status",
-    "quality_status",
-    "git_commit",
-    "git_dirty",
     "attack_created_at",
-    "attack_python_version",
-    "attack_torch_version",
-    "attack_transformers_version",
     "core_evaluated_at",
     "quality_evaluated_at",
-    "python_version",
-    "torch_version",
-    "transformers_version",
-    "datasets_version",
-    "bert_score_version",
-    "cuda_version",
-    "gpus",
     "metrics_schema_version",
-    "run_dir",
-    "success_queries_file",
 ]
 
 
@@ -276,12 +216,6 @@ def _normalized_method(config):
     return configured
 
 
-def _stage_status(status, stage):
-    """Return one pipeline-stage state without assuming status.json is complete."""
-
-    return (status.get(stage) or {}).get("status")
-
-
 def _validate_v3(run_dir, config, core, quality, queries, manifest):
     """Reject stale or internally inconsistent metrics before CSV generation."""
 
@@ -308,8 +242,6 @@ def _validate_v3(run_dir, config, core, quality, queries, manifest):
         raise ValueError(f"Core counts must be integers in {run_dir}.")
     if total != successful + failed + skipped:
         raise ValueError(f"Core counts do not satisfy N=S+F+K in {run_dir}.")
-    if core.get("attackable") != successful + failed:
-        raise ValueError(f"Core attackable count does not satisfy A=S+F in {run_dir}.")
     if core.get("query_budget") != config["attack"]["query_budget"]:
         raise ValueError(f"Core query budget does not match config in {run_dir}.")
     dataset = config["dataset"]
@@ -346,14 +278,10 @@ def _validate_v3(run_dir, config, core, quality, queries, manifest):
 
 
 def _quality_fields(quality):
-    """Flatten quality values, statuses, and actionable failures."""
+    """Flatten paper-facing quality metric values."""
 
     metrics = quality.get("metrics") or {}
     fields = {"quality_successful_sample_count": quality.get("successful_sample_count")}
-    for name in QUALITY_METRICS:
-        metric = metrics.get(name) or {}
-        fields[f"quality_{name}_status"] = metric.get("status")
-        fields[f"quality_{name}_error"] = metric.get("error")
     fields["bleu"] = ((metrics.get("bleu") or {}).get("values") or {}).get("value")
     fields["meteor"] = ((metrics.get("meteor") or {}).get("values") or {}).get("value")
     fields["rouge_l"] = (
@@ -362,35 +290,16 @@ def _quality_fields(quality):
     bertscore = ((metrics.get("bertscore") or {}).get("values") or {})
     for name in ("precision", "recall", "f1"):
         fields[f"bertscore_{name}"] = bertscore.get(name)
-    fields["quality_bertscore_weight_format"] = bertscore.get("model_weight_format")
-    bertscore_config = (metrics.get("bertscore") or {}).get("config") or {}
-    fields["quality_bertscore_model"] = bertscore_config.get("model_name_or_path")
-    fields["quality_bertscore_num_layers"] = bertscore_config.get("num_layers")
-    fields["quality_bertscore_idf"] = bertscore_config.get("idf")
-    fields["quality_bertscore_rescale_with_baseline"] = bertscore_config.get(
-        "rescale_with_baseline"
-    )
     return fields
 
 
 def _resource_fields(resources):
-    """Flatten target-model and optional NLI resource profiles separately."""
+    """Flatten paper-facing resource measurements."""
 
-    fields = {
-        name: resources.get(name)
-        for name in (
-            "end_to_end_seconds",
-            "end_to_end_seconds_per_success",
-            "peak_vram_bytes",
-        )
-    }
-    nli = resources.get("nli") or {}
-    for name in RESOURCE_COLUMNS[3:]:
-        fields[name] = nli.get(name.removeprefix("nli_"))
-    return fields
+    return {name: resources.get(name) for name in RESOURCE_COLUMNS}
 
 
-def build_row(run_dir, input_dir):
+def build_row(run_dir):
     """Validate and flatten one self-contained experiment run."""
 
     config = _read_yaml(run_dir / "config.resolved.yaml")
@@ -398,7 +307,6 @@ def build_row(run_dir, input_dir):
     quality = _read_json(run_dir / "metrics" / "quality.json")
     queries = _read_json(run_dir / "metrics" / "success_queries.json")
     manifest = _read_json(run_dir / "sample_manifest.json")
-    status = _read_json(run_dir / "status.json")
     provenance = _read_json(run_dir / "provenance.json")
     _validate_v3(run_dir, config, core, quality, queries, manifest)
 
@@ -412,14 +320,8 @@ def build_row(run_dir, input_dir):
         and search.get("ranking") == "epsilon_pareto"
     ):
         infeasible_state_policy = "feasibility_first"
-    threshold = (config.get("semantic") or {}).get("threshold") or {}
-    calibration = config.get("calibration") or {}
-    judge = calibration.get("judge") or {}
-    attack_packages = provenance.get("packages") or {}
     core_runtime = core.get("evaluation_runtime") or {}
     quality_runtime = quality.get("evaluation_runtime") or {}
-    metric_runtime = quality_runtime or core_runtime
-    packages = metric_runtime.get("packages") or attack_packages
     initial = core.get("initial_state_counts") or {}
     row = {
         "dataset": config["dataset"]["id"],
@@ -447,48 +349,18 @@ def build_row(run_dir, input_dir):
         ),
         "epsilon_decay": epsilon.get("decay"),
         "infeasible_state_policy": infeasible_state_policy,
-        "semantic_constraint": attack["semantic_constraint"],
-        "threshold_source": threshold.get("source"),
-        "threshold_backend": threshold.get("backend") or judge.get("backend"),
-        "threshold_entailment": threshold.get("entailment"),
-        "threshold_contradiction": threshold.get("contradiction"),
         "query_budget": attack["query_budget"],
         "manifest_split": manifest.get("split"),
-        "manifest_dataset_fingerprint": manifest.get("dataset_fingerprint"),
-        "manifest_dataset_revision": manifest.get("dataset_revision"),
-        "manifest_sampling_algorithm": manifest.get("sampling_algorithm"),
-        "manifest_population_size": manifest.get("population_size"),
-        "manifest_requested_sample_size": manifest.get("requested_sample_size"),
         "manifest_sample_count": manifest.get("effective_sample_size"),
         "manifest_seed": manifest.get("seed"),
-        "manifest_selection_sha256": manifest.get("selection_sha256"),
         "initial_both_correct": initial.get("both_correct"),
         "initial_new_correct_old_wrong": initial.get("new_correct_old_wrong"),
         "initial_both_wrong": initial.get("both_wrong"),
         "initial_already_differential": initial.get("already_differential"),
-        "attack_status": _stage_status(status, "attack"),
-        "core_status": _stage_status(status, "core_evaluation"),
-        "quality_status": quality.get("status"),
-        "git_commit": provenance.get("git_commit"),
-        "git_dirty": provenance.get("git_dirty"),
         "attack_created_at": provenance.get("created_at"),
-        "attack_python_version": provenance.get("python"),
-        "attack_torch_version": attack_packages.get("torch"),
-        "attack_transformers_version": attack_packages.get("transformers"),
         "core_evaluated_at": core_runtime.get("evaluated_at"),
         "quality_evaluated_at": quality_runtime.get("evaluated_at"),
-        "python_version": metric_runtime.get("python") or provenance.get("python"),
-        "torch_version": packages.get("torch"),
-        "transformers_version": packages.get("transformers"),
-        "datasets_version": packages.get("datasets"),
-        "bert_score_version": packages.get("bert-score"),
-        "cuda_version": provenance.get("cuda_version"),
-        "gpus": " | ".join(provenance.get("gpus") or []),
         "metrics_schema_version": core.get("schema_version"),
-        "run_dir": str(run_dir.relative_to(input_dir)),
-        "success_queries_file": str(
-            (run_dir / "metrics" / "success_queries.json").relative_to(input_dir)
-        ),
     }
     for name in CORE_COLUMNS:
         if not name.startswith("initial_"):
@@ -498,17 +370,6 @@ def build_row(run_dir, input_dir):
             row[name] = value
     row.update(_quality_fields(quality))
     row.update(_resource_fields(core.get("resources") or {}))
-    nli_profile = (core.get("resources") or {}).get("nli") or {}
-    row["threshold_entailment"] = (
-        row["threshold_entailment"]
-        if row["threshold_entailment"] is not None
-        else nli_profile.get("entailment_threshold")
-    )
-    row["threshold_contradiction"] = (
-        row["threshold_contradiction"]
-        if row["threshold_contradiction"] is not None
-        else nli_profile.get("contradiction_threshold")
-    )
     return row
 
 
@@ -532,7 +393,19 @@ def write_summary(input_dir, output_path):
     run_dirs = discover_runs(input_dir)
     if not run_dirs:
         raise ValueError(f"No experiment runs found below {input_dir}.")
-    rows = [build_row(run_dir, input_dir) for run_dir in run_dirs]
+    rows = []
+    skipped = 0
+    for run_dir in run_dirs:
+        try:
+            rows.append(build_row(run_dir))
+        except FileNotFoundError as exc:
+            skipped += 1
+            print(
+                f"Skipping incomplete experiment {run_dir}: {exc}",
+                file=sys.stderr,
+            )
+    if skipped:
+        print(f"Skipped {skipped} incomplete experiment(s).", file=sys.stderr)
     rows.sort(
         key=lambda row: (
             row["dataset"],

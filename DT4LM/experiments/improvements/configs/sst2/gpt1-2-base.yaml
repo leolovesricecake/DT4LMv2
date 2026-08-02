@@ -1,26 +1,30 @@
-# Complete RTE Base run; RTE uses all rows when fewer than 1,000 are available.
+# Complete SST-2 Base run; paths resolve from DT4LM/.
 schema_version: 2
 experiment:
-  id: rte-albertbasev1-v2-base
+  id: sst2-gpt1-2-base
   method: base
   seed: 765
   output_root: outputs/dt4lm-improvements
 dataset:
-  id: rte
-  path: outputs/datasets/rte
+  id: sst2
+  path: outputs/datasets/sst2
   revision: null
-  text_columns: [premise, hypothesis]
+  text_columns: [sentence]
   label_column: label
-  task_definition: Determine whether the premise entails the hypothesis.
+  task_definition: Classify the sentence sentiment as negative or positive.
   evaluation:
     split: test
     sample_size: 1000
     sample_seed: 765
-    manifest: outputs/dt4lm-improvements/sample_sets/rte/test-n1000-seed765.json
+    manifest: outputs/dt4lm-improvements/sample_sets/sst2/test-n1000-seed765.json
 models:
   id: gpt1-2
-  old: {name_or_path: outputs/finetuned/albertbasev1_rte/best_model, revision: null}
-  new: {name_or_path: outputs/finetuned/albertbasev2_rte/best_model, revision: null}
+  old:
+    name_or_path: outputs/finetuned/gpt1_sst2/best_model
+    revision: null
+  new:
+    name_or_path: outputs/finetuned/gpt2_sst2/best_model
+    revision: null
 attack:
   recipe: kuleshov_var
   differential_objective: dynamic
@@ -31,7 +35,8 @@ semantic:
 calibration:
   enabled: false
 evaluation:
-  core: {success_budgets: [100, 500, 1000]}
+  core:
+    success_budgets: [100, 500, 1000]
   quality:
     bleu: {enabled: true}
     meteor: {enabled: true}
