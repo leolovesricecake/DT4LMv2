@@ -19,6 +19,7 @@ IDENTITY_COLUMNS = [
     "dataset",
     "model_pair",
     "method",
+    "configured_method",
     "seed",
     "attack_seed",
     "experiment_id",
@@ -37,6 +38,7 @@ IDENTITY_COLUMNS = [
     "epsilon_initial_quantile",
     "epsilon_initialization_max_expansions",
     "epsilon_decay",
+    "infeasible_state_policy",
     "semantic_constraint",
     "threshold_source",
     "threshold_backend",
@@ -97,7 +99,13 @@ CORE_COLUMNS = [
     "budget_truncation_rate",
     "non_top1_path_rate",
     "escape_path_rate",
+    "root_inclusive_escape_path_rate",
     "old_prediction_error_path_rate",
+    "root_inclusive_old_prediction_error_path_rate",
+    "post_root_escape_path_rate",
+    "post_root_old_prediction_error_path_rate",
+    "discarded_infeasible_state_count",
+    "discarded_infeasible_state_rate",
     "epsilon_zero_initialization_rate",
     "epsilon_to_root_margin_ratio_median",
     "epsilon_initialization_expansion_mean",
@@ -253,6 +261,21 @@ def _model_training_seed(config, key):
     return value.get("training_seed") if isinstance(value, dict) else None
 
 
+def _normalized_method(config):
+    """Relabel legacy strict-PBS artifacts by their actual frontier policy."""
+
+    configured = config["experiment"]["method"]
+    search = config["attack"].get("search") or {}
+    epsilon = search.get("epsilon") or {}
+    if (
+        configured == "strict-pbs"
+        and epsilon.get("mode") == "strict"
+        and "infeasible_state_policy" not in epsilon
+    ):
+        return "feasibility-first-pbs"
+    return configured
+
+
 def _stage_status(status, stage):
     """Return one pipeline-stage state without assuming status.json is complete."""
 
@@ -383,6 +406,12 @@ def build_row(run_dir, input_dir):
     attack = config["attack"]
     search = attack.get("search") or {"method": "legacy_greedy"}
     epsilon = search.get("epsilon") or {}
+    infeasible_state_policy = epsilon.get("infeasible_state_policy")
+    if (
+        infeasible_state_policy is None
+        and search.get("ranking") == "epsilon_pareto"
+    ):
+        infeasible_state_policy = "feasibility_first"
     threshold = (config.get("semantic") or {}).get("threshold") or {}
     calibration = config.get("calibration") or {}
     judge = calibration.get("judge") or {}
@@ -395,7 +424,8 @@ def build_row(run_dir, input_dir):
     row = {
         "dataset": config["dataset"]["id"],
         "model_pair": config["models"]["id"],
-        "method": experiment["method"],
+        "method": _normalized_method(config),
+        "configured_method": experiment["method"],
         "seed": experiment["seed"],
         "attack_seed": experiment["seed"],
         "experiment_id": experiment["id"],
@@ -416,6 +446,7 @@ def build_row(run_dir, input_dir):
             "initialization_max_expansions"
         ),
         "epsilon_decay": epsilon.get("decay"),
+        "infeasible_state_policy": infeasible_state_policy,
         "semantic_constraint": attack["semantic_constraint"],
         "threshold_source": threshold.get("source"),
         "threshold_backend": threshold.get("backend") or judge.get("backend"),

@@ -12,9 +12,43 @@ SPEC = importlib.util.spec_from_file_location(
 )
 evaluation = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(evaluation)
+AGGREGATE_SPEC = importlib.util.spec_from_file_location(
+    "dt4lm_aggregate_improvements",
+    ROOT / "statistics/aggregate_improvements.py",
+)
+aggregation = importlib.util.module_from_spec(AGGREGATE_SPEC)
+AGGREGATE_SPEC.loader.exec_module(aggregation)
 
 
 class MetricTests(unittest.TestCase):
+    def test_legacy_strict_name_is_normalized_by_actual_policy(self):
+        legacy = {
+            "experiment": {"method": "strict-pbs"},
+            "attack": {
+                "search": {
+                    "ranking": "epsilon_pareto",
+                    "epsilon": {"mode": "strict"},
+                }
+            },
+        }
+        hard = {
+            "experiment": {"method": "strict-pbs"},
+            "attack": {
+                "search": {
+                    "ranking": "epsilon_pareto",
+                    "epsilon": {
+                        "mode": "strict",
+                        "infeasible_state_policy": "discard",
+                    },
+                }
+            },
+        }
+
+        self.assertEqual(
+            aggregation._normalized_method(legacy), "feasibility-first-pbs"
+        )
+        self.assertEqual(aggregation._normalized_method(hard), "strict-pbs")
+
     def test_core_metrics_keep_three_state_and_search_denominators(self):
         manifest = {
             "effective_sample_size": 3,
@@ -37,9 +71,13 @@ class MetricTests(unittest.TestCase):
                     "query_cache_hit_count": 1,
                     "query_cache_miss_count": 3,
                     "budget_truncated_candidate_count": 0,
+                    "candidate_state_count": 4,
+                    "discarded_infeasible_state_count": 1,
                     "root_dynamic_rank": 2,
                     "path_has_negative_old_margin": True,
                     "path_has_old_prediction_error": False,
+                    "path_has_post_root_negative_old_margin": True,
+                    "path_has_post_root_old_prediction_error": False,
                     "epsilon_zero_initialization": False,
                     "epsilon_to_root_margin_ratio": 0.5,
                     "epsilon_initialization_expansion": 2,
@@ -61,6 +99,8 @@ class MetricTests(unittest.TestCase):
                     "query_cache_hit_count": 0,
                     "query_cache_miss_count": 2,
                     "budget_truncated_candidate_count": 1,
+                    "candidate_state_count": 2,
+                    "discarded_infeasible_state_count": 1,
                     "epsilon_zero_initialization": True,
                     "epsilon_to_root_margin_ratio": 0.0,
                     "epsilon_initialization_expansion": 2,
@@ -88,6 +128,8 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(core["budget_penalized_queries_mean"], 505)
         self.assertAlmostEqual(core["duplicate_state_rate"], 1 / 6)
         self.assertEqual(core["non_top1_path_rate"], 1)
+        self.assertEqual(core["post_root_escape_path_rate"], 1)
+        self.assertAlmostEqual(core["discarded_infeasible_state_rate"], 1 / 3)
         self.assertEqual(core["epsilon_zero_initialization_rate"], 0.5)
         self.assertEqual(
             queries["data"],

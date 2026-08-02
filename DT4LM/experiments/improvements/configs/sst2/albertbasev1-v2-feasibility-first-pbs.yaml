@@ -1,29 +1,29 @@
 schema_version: 2
 experiment:
-  id: mr-albertbasev1-v2-ae-pbs
-  method: ae-pbs
+  id: sst2-albertbasev1-v2-feasibility-first-pbs
+  method: feasibility-first-pbs
   seed: 765
   output_root: outputs/dt4lm-improvements
 dataset:
-  id: mr
-  path: outputs/datasets/mr
+  id: sst2
+  path: outputs/datasets/sst2
   revision: null
   text_columns:
-  - text
+  - sentence
   label_column: label
-  task_definition: Classify the movie review sentiment as negative or positive.
+  task_definition: Classify the sentence sentiment as negative or positive.
   evaluation:
     split: test
     sample_size: 1000
     sample_seed: 765
-    manifest: outputs/dt4lm-improvements/sample_sets/mr/test-n1000-seed765.json
+    manifest: outputs/dt4lm-improvements/sample_sets/sst2/test-n1000-seed765.json
 models:
   id: albertbasev1-v2
   old:
-    name_or_path: outputs/finetuned/albertbasev1_mr/best_model
+    name_or_path: outputs/finetuned/albertbasev1_sst2/best_model
     revision: null
   new:
-    name_or_path: outputs/finetuned/albertbasev2_mr/best_model
+    name_or_path: outputs/finetuned/albertbasev2_sst2/best_model
     revision: null
 attack:
   recipe: kuleshov_var
@@ -35,10 +35,7 @@ attack:
     ranking: epsilon_pareto
     beam_size: 5
     epsilon:
-      mode: adaptive
-      initial_quantile: 0.75
-      initialization_max_expansions: 2
-      decay: quadratic
+      mode: strict
       infeasible_state_policy: feasibility_first
     diagnostics:
       trace_enabled: false

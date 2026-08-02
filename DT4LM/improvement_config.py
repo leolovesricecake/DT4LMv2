@@ -13,6 +13,7 @@ THRESHOLD_SOURCES = frozenset(("none", "manual", "calibrated"))
 SEARCH_METHODS = frozenset(("legacy_greedy", "async_frontier"))
 FRONTIER_RANKINGS = frozenset(("dynamic", "epsilon_pareto"))
 EPSILON_MODES = frozenset(("disabled", "strict", "adaptive"))
+INFEASIBLE_STATE_POLICIES = frozenset(("feasibility_first", "discard"))
 
 
 def _require(mapping: Mapping[str, Any], key: str, context: str) -> Any:
@@ -175,7 +176,7 @@ def validate_experiment_config(config: Mapping[str, Any]) -> None:
                     "attack.search.epsilon.mode must be one of "
                     f"{sorted(EPSILON_MODES)!r}."
                 )
-            expected_epsilon_fields = (
+            base_epsilon_fields = (
                 {
                     "mode",
                     "initial_quantile",
@@ -185,18 +186,36 @@ def validate_experiment_config(config: Mapping[str, Any]) -> None:
                 if epsilon_mode == "adaptive"
                 else {"mode"}
             )
-            if set(epsilon) != expected_epsilon_fields:
+            allowed_epsilon_fields = {frozenset(base_epsilon_fields)}
+            if epsilon_mode in {"strict", "adaptive"}:
+                allowed_epsilon_fields.add(
+                    frozenset(base_epsilon_fields | {"infeasible_state_policy"})
+                )
+            if frozenset(epsilon) not in allowed_epsilon_fields:
                 raise ValueError(
-                    f"{epsilon_mode} epsilon fields must be exactly "
-                    f"{sorted(expected_epsilon_fields)!r}."
+                    f"Invalid fields for {epsilon_mode} epsilon configuration."
                 )
             if search["ranking"] == "dynamic" and epsilon_mode != "disabled":
                 raise ValueError("Dynamic frontier ranking requires disabled epsilon.")
             if search["ranking"] == "epsilon_pareto" and epsilon_mode == "disabled":
                 raise ValueError(
-                    "Epsilon-Pareto frontier ranking requires strict or adaptive epsilon."
+                    "Epsilon-Pareto frontier ranking requires strict or "
+                    "adaptive epsilon."
+                )
+            infeasible_policy = epsilon.get(
+                "infeasible_state_policy", "feasibility_first"
+            )
+            if infeasible_policy not in INFEASIBLE_STATE_POLICIES:
+                raise ValueError(
+                    "attack.search.epsilon.infeasible_state_policy must be one of "
+                    f"{sorted(INFEASIBLE_STATE_POLICIES)!r}."
                 )
             if epsilon_mode == "adaptive":
+                if infeasible_policy != "feasibility_first":
+                    raise ValueError(
+                        "Adaptive epsilon requires infeasible_state_policy: "
+                        "feasibility_first."
+                    )
                 for key in (
                     "initial_quantile",
                     "initialization_max_expansions",

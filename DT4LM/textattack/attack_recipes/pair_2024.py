@@ -162,6 +162,7 @@ class PAIR2024(AttackRecipe):
                     args.epsilon_initialization_max_expansions
                 ),
                 epsilon_decay=args.epsilon_decay,
+                infeasible_state_policy=args.infeasible_state_policy,
                 trace_output=args.search_trace_output,
             )
         return textattack.Attack(

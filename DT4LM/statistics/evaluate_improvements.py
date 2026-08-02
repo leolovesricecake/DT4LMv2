@@ -176,6 +176,23 @@ def _search_diagnostic_metrics(records, statuses):
         for item in successful_diagnostics
         if item.get("path_has_old_prediction_error") is not None
     ]
+    post_root_escaped = [
+        bool(item.get("path_has_post_root_negative_old_margin"))
+        for item in successful_diagnostics
+        if item.get("path_has_post_root_negative_old_margin") is not None
+    ]
+    post_root_old_prediction_errors = [
+        bool(item.get("path_has_post_root_old_prediction_error"))
+        for item in successful_diagnostics
+        if item.get("path_has_post_root_old_prediction_error") is not None
+    ]
+    discarded_infeasible_states = sum(
+        int(item.get("discarded_infeasible_state_count") or 0)
+        for item in diagnostics
+    )
+    candidate_states = sum(
+        int(item.get("candidate_state_count") or 0) for item in diagnostics
+    )
     epsilon_ratios = values("epsilon_to_root_margin_ratio", adaptive)
     initialization_expansions = values(
         "epsilon_initialization_expansion", adaptive
@@ -210,8 +227,28 @@ def _search_diagnostic_metrics(records, statuses):
         ),
         "non_top1_path_rate": mean(non_top1) if non_top1 else None,
         "escape_path_rate": mean(escaped) if escaped else None,
+        "root_inclusive_escape_path_rate": (
+            mean(escaped) if escaped else None
+        ),
         "old_prediction_error_path_rate": (
             mean(old_prediction_errors) if old_prediction_errors else None
+        ),
+        "root_inclusive_old_prediction_error_path_rate": (
+            mean(old_prediction_errors) if old_prediction_errors else None
+        ),
+        "post_root_escape_path_rate": (
+            mean(post_root_escaped) if post_root_escaped else None
+        ),
+        "post_root_old_prediction_error_path_rate": (
+            mean(post_root_old_prediction_errors)
+            if post_root_old_prediction_errors
+            else None
+        ),
+        "discarded_infeasible_state_count": discarded_infeasible_states,
+        "discarded_infeasible_state_rate": (
+            discarded_infeasible_states / candidate_states
+            if candidate_states
+            else None
         ),
         "epsilon_zero_initialization_rate": (
             mean(

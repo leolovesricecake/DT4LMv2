@@ -14,6 +14,7 @@ from .differential_frontier import (
     epsilon_at,
     estimate_initial_epsilon,
     select_frontier,
+    strictly_feasible_states,
     summarize_values,
 )
 
@@ -82,6 +83,7 @@ class DifferentialSearchState:
     result: object
     old_prediction: int
     new_prediction: int
+    old_is_correct: bool
     old_correct_margin: float
     new_error_margin: float
     modification_cost: float
@@ -94,6 +96,8 @@ class DifferentialSearchState:
     expanded: bool = False
     path_has_negative_old_margin: bool = False
     path_has_old_prediction_error: bool = False
+    path_has_post_root_negative_old_margin: bool = False
+    path_has_post_root_old_prediction_error: bool = False
     root_dynamic_rank: Optional[int] = None
 
 
@@ -108,6 +112,7 @@ class SearchDiagnosticsAccumulator:
     query_cache_misses: int = 0
     queried_candidates: int = 0
     budget_truncated_candidates: int = 0
+    discarded_infeasible_states: int = 0
     evaluated_states: int = 0
     expansions: int = 0
     max_depth: int = 0
@@ -180,6 +185,11 @@ class SearchDiagnosticsAccumulator:
             "ranking": search.ranking,
             "beam_size": search.beam_size,
             "epsilon_mode": search.epsilon_mode,
+            "infeasible_state_policy": (
+                search.infeasible_state_policy
+                if search.ranking == "epsilon_pareto"
+                else None
+            ),
             "initial_quantile": (
                 search.epsilon_initial_quantile
                 if search.epsilon_mode == "adaptive"
@@ -213,6 +223,7 @@ class SearchDiagnosticsAccumulator:
             "query_cache_miss_count": self.query_cache_misses,
             "queried_candidate_count": self.queried_candidates,
             "budget_truncated_candidate_count": self.budget_truncated_candidates,
+            "discarded_infeasible_state_count": self.discarded_infeasible_states,
             "frontier_size_mean": self._mean(
                 self.frontier_size_sum, self.frontier_observations
             ),
@@ -248,6 +259,16 @@ class SearchDiagnosticsAccumulator:
                 if successful_state is not None
                 else None
             ),
+            "path_has_post_root_negative_old_margin": (
+                successful_state.path_has_post_root_negative_old_margin
+                if successful_state is not None
+                else None
+            ),
+            "path_has_post_root_old_prediction_error": (
+                successful_state.path_has_post_root_old_prediction_error
+                if successful_state is not None
+                else None
+            ),
             "termination_reason": termination_reason,
         }
 
@@ -264,6 +285,7 @@ class AsyncDifferentialBeamSearch(SearchMethod):
         epsilon_initial_quantile=0.75,
         epsilon_initialization_max_expansions=2,
         epsilon_decay="quadratic",
+        infeasible_state_policy="feasibility_first",
         trace_output=None,
     ):
         self.ranking = ranking
@@ -274,6 +296,7 @@ class AsyncDifferentialBeamSearch(SearchMethod):
             epsilon_initialization_max_expansions
         )
         self.epsilon_decay = epsilon_decay
+        self.infeasible_state_policy = infeasible_state_policy
         self.trace_output = Path(trace_output) if trace_output else None
         self._validate_configuration()
 
@@ -284,13 +307,23 @@ class AsyncDifferentialBeamSearch(SearchMethod):
             raise ValueError("beam_size must be positive.")
         if self.epsilon_mode not in {"disabled", "strict", "adaptive"}:
             raise ValueError("Unknown epsilon mode.")
+        if self.infeasible_state_policy not in {"feasibility_first", "discard"}:
+            raise ValueError("Unknown infeasible-state policy.")
         if self.ranking == "dynamic" and self.epsilon_mode != "disabled":
             raise ValueError("Dynamic frontier ranking requires disabled epsilon.")
+        if self.ranking == "dynamic" and self.infeasible_state_policy != (
+            "feasibility_first"
+        ):
+            raise ValueError("Dynamic frontier ranking has no infeasible states.")
         if self.ranking == "epsilon_pareto" and self.epsilon_mode == "disabled":
             raise ValueError(
                 "Epsilon-Pareto ranking requires strict or adaptive epsilon."
             )
         if self.epsilon_mode == "adaptive":
+            if self.infeasible_state_policy != "feasibility_first":
+                raise ValueError(
+                    "Adaptive epsilon requires feasibility_first handling."
+                )
             if not 0.0 <= self.epsilon_initial_quantile <= 1.0:
                 raise ValueError("epsilon_initial_quantile must lie in [0, 1].")
             if self.epsilon_initialization_max_expansions <= 0:
@@ -365,6 +398,7 @@ class AsyncDifferentialBeamSearch(SearchMethod):
             result=result,
             old_prediction=old_prediction,
             new_prediction=new_prediction,
+            old_is_correct=(old_prediction == label),
             old_correct_margin=old_margin,
             new_error_margin=new_margin,
             modification_cost=result.attacked_text.modification_rate(root_text),
@@ -389,6 +423,20 @@ class AsyncDifferentialBeamSearch(SearchMethod):
                 old_prediction != label
                 or (
                     parent is not None and parent.path_has_old_prediction_error
+                )
+            ),
+            path_has_post_root_negative_old_margin=(
+                parent is not None
+                and (
+                    old_margin < 0.0
+                    or parent.path_has_post_root_negative_old_margin
+                )
+            ),
+            path_has_post_root_old_prediction_error=(
+                parent is not None
+                and (
+                    old_prediction != label
+                    or parent.path_has_post_root_old_prediction_error
                 )
             ),
         )
@@ -462,6 +510,12 @@ class AsyncDifferentialBeamSearch(SearchMethod):
         ]
         if not selectable:
             return states[0]
+        if self.infeasible_state_policy == "discard":
+            strictly_feasible = strictly_feasible_states(selectable)
+            if strictly_feasible:
+                selectable = strictly_feasible
+            else:
+                return states[0]
         selected, _ = self._select_states(selectable, epsilon)
         return selected[0]
 
@@ -685,6 +739,16 @@ class AsyncDifferentialBeamSearch(SearchMethod):
                     self._diagnostics.max_depth, state.depth
                 )
             self._diagnostics.evaluated_states += len(new_states)
+            retained_new_states = new_states
+            discarded_infeasible_states = 0
+            if self.infeasible_state_policy == "discard":
+                retained_new_states = strictly_feasible_states(new_states)
+                discarded_infeasible_states = (
+                    len(new_states) - len(retained_new_states)
+                )
+                self._diagnostics.discarded_infeasible_states += (
+                    discarded_infeasible_states
+                )
             batch_stats = {
                 "generated_candidate_count": int(
                     transformation_stats.get("generated", len(transformations))
@@ -701,6 +765,7 @@ class AsyncDifferentialBeamSearch(SearchMethod):
                 "budget_truncated_candidate_count": (
                     len(miss_entries) - len(queried_results)
                 ),
+                "discarded_infeasible_state_count": discarded_infeasible_states,
             }
 
             if parent.depth == 0:
@@ -745,7 +810,8 @@ class AsyncDifferentialBeamSearch(SearchMethod):
                     initialization_expansion = self._diagnostics.expansions
                     epsilon_zero_initialization = True
                 trace_frontier, trace_metadata = self._select_states(
-                    frontier + new_states, self._current_epsilon(epsilon_0)
+                    frontier + retained_new_states,
+                    self._current_epsilon(epsilon_0),
                 )
                 self._write_trace(
                     root_state,
@@ -770,7 +836,7 @@ class AsyncDifferentialBeamSearch(SearchMethod):
 
             epsilon = self._current_epsilon(epsilon_0)
             frontier, metadata = self._select_states(
-                frontier + new_states, epsilon
+                frontier + retained_new_states, epsilon
             )
             self._diagnostics.observe_frontier(frontier, self.ranking, metadata)
             self._write_trace(
@@ -820,4 +886,5 @@ class AsyncDifferentialBeamSearch(SearchMethod):
             "epsilon_initial_quantile",
             "epsilon_initialization_max_expansions",
             "epsilon_decay",
+            "infeasible_state_policy",
         ]

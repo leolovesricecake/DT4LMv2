@@ -15,6 +15,25 @@ import yaml
 VALID_STATUSES = frozenset(("successful", "failed", "skipped"))
 
 
+def _method_identity(config):
+    """Return the semantic method name and explicit infeasible policy."""
+
+    configured = config["experiment"]["method"]
+    search = config["attack"].get("search") or {}
+    epsilon = search.get("epsilon") or {}
+    policy = epsilon.get("infeasible_state_policy")
+    if policy is None and search.get("ranking") == "epsilon_pareto":
+        policy = "feasibility_first"
+    method = configured
+    if (
+        configured == "strict-pbs"
+        and epsilon.get("mode") == "strict"
+        and "infeasible_state_policy" not in epsilon
+    ):
+        method = "feasibility-first-pbs"
+    return method, policy
+
+
 def _read_json(path):
     with open(path, encoding="utf-8") as handle:
         return json.load(handle)
@@ -226,6 +245,19 @@ def compare_runs(baseline, candidate, *, bootstrap_samples=10000, seed=765):
         and row["search_diagnostics"].get("path_has_old_prediction_error")
         is not None
     ]
+    unique_post_root_escape = [
+        bool(
+            row["search_diagnostics"].get(
+                "path_has_post_root_negative_old_margin"
+            )
+        )
+        for row in candidate_unique_rows
+        if isinstance(row.get("search_diagnostics"), dict)
+        and row["search_diagnostics"].get(
+            "path_has_post_root_negative_old_margin"
+        )
+        is not None
+    ]
 
     success_bootstrap = _paired_bootstrap(
         baseline_success,
@@ -255,14 +287,18 @@ def compare_runs(baseline, candidate, *, bootstrap_samples=10000, seed=765):
         statistic=median,
     )
 
+    baseline_method, baseline_policy = _method_identity(baseline["config"])
+    candidate_method, candidate_policy = _method_identity(candidate["config"])
     return {
         "schema_version": 1,
         "baseline_run": str(baseline["path"]),
         "candidate_run": str(candidate["path"]),
         "dataset": baseline["config"]["dataset"]["id"],
         "model_pair": baseline["config"]["models"]["id"],
-        "baseline_method": baseline["config"]["experiment"]["method"],
-        "candidate_method": candidate["config"]["experiment"]["method"],
+        "baseline_method": baseline_method,
+        "candidate_method": candidate_method,
+        "baseline_infeasible_state_policy": baseline_policy,
+        "candidate_infeasible_state_policy": candidate_policy,
         "baseline_attack_seed": baseline["config"]["experiment"].get("seed"),
         "candidate_attack_seed": candidate["config"]["experiment"].get("seed"),
         "query_budget": query_budget,
@@ -316,6 +352,11 @@ def compare_runs(baseline, candidate, *, bootstrap_samples=10000, seed=765):
             "old_prediction_error_path_rate": (
                 mean(unique_old_prediction_error)
                 if unique_old_prediction_error
+                else None
+            ),
+            "post_root_escape_path_rate": (
+                mean(unique_post_root_escape)
+                if unique_post_root_escape
                 else None
             ),
         },

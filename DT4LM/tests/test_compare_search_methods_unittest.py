@@ -87,6 +87,7 @@ class ComparisonTests(unittest.TestCase):
                     "root_dynamic_rank": 2,
                     "path_has_negative_old_margin": True,
                     "path_has_old_prediction_error": True,
+                    "path_has_post_root_negative_old_margin": True,
                 },
             },
             {
@@ -123,6 +124,12 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(
             result["candidate_unique_success_mechanism"][
                 "old_prediction_error_path_rate"
+            ],
+            1,
+        )
+        self.assertEqual(
+            result["candidate_unique_success_mechanism"][
+                "post_root_escape_path_rate"
             ],
             1,
         )

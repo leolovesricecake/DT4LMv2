@@ -131,6 +131,7 @@ experiments/improvements/configs/
     albertbasev1-v2-semdt-hf.yaml
     albertbasev1-v2-combined-openai.yaml
     albertbasev1-v2-dynamic-beam.yaml
+    albertbasev1-v2-feasibility-first-pbs.yaml
     albertbasev1-v2-strict-pbs.yaml
     albertbasev1-v2-epsilon-greedy.yaml
     albertbasev1-v2-ae-pbs.yaml
@@ -320,11 +321,14 @@ CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
 ### 8.1 运行 AE-PBS 与消融方法
 
 AE-PBS 使用独立的异步 frontier 搜索，不会改变 Base、Static、LexiDT 或 SemDT
-的默认搜索器。首轮需要在同一个 test manifest 上分别运行四份完整配置：
+的默认搜索器。方法分析应在同一个 test manifest 上分别运行五份完整配置：
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-dynamic-beam.yaml
+
+CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
+  experiments/improvements/configs/sst2/albertbasev1-v2-feasibility-first-pbs.yaml
 
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-strict-pbs.yaml
@@ -336,8 +340,13 @@ CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-ae-pbs.yaml
 ```
 
-四种配置分别隔离异步多路径、严格 Pareto、单路径自适应 epsilon 和完整
-AE-PBS。主配置中的搜索块为：
+五种配置分别隔离异步多路径、可行优先 Pareto、硬严格 Pareto、单路径自适应
+epsilon 和完整 AE-PBS。`infeasible_state_policy` 的语义是：
+
+- `feasibility_first`：当前可行状态优先，frontier 有空位时仍按违反量保留不可行状态；
+- `discard`：root 可以无条件完成首次扩展，之后旧模型预测错误的候选永久丢弃。
+
+AE-PBS 主配置中的搜索块为：
 
 ```yaml
 attack:
@@ -351,13 +360,18 @@ attack:
       initial_quantile: 0.75
       initialization_max_expansions: 2
       decay: quadratic
+      infeasible_state_policy: feasibility_first
     diagnostics:
       trace_enabled: false
 ```
 
+真正的 Strict-PBS 使用 `mode: strict` 和
+`infeasible_state_policy: discard`。Feasibility-First PBS 使用相同的
+`mode: strict`，但政策为 `feasibility_first`。
+
 这些参数应先在与正式 test manifest 不相交的 validation/pilot 样本上确定。参数
 冻结后再运行正式 test，不能根据 test 结果回选 `beam_size`、分位数、初始化窗口
-或衰减方式。仓库中的 16 份新配置可由下列脚本从各数据集 Base 配置重新生成：
+或衰减方式。仓库中的 20 份搜索配置可由下列脚本从各数据集 Base 配置重新生成：
 
 ```bash
 python experiments/improvements/generate_ae_configs.py
@@ -410,11 +424,16 @@ AMR、QPS、状态分布及 `resources`。`success_queries.json` 以等长的
 QPS 口径为全部 manifest 样本产生的模型对查询总数除以成功生成数，失败和
 skipped 的查询也进入分子；成功数为 0 时为 `null`。
 
-AE-PBS 运行还会在 `core.json` 中记录 frontier、路径和 epsilon 的聚合诊断，
+AE-PBS/PBS 运行还会在 `core.json` 中记录 frontier、路径和 epsilon 的聚合诊断，
 以及预算惩罚查询成本：成功样本取 `queries_to_success`，失败样本按完整查询预算
 计，skipped 不进入。将 `attack.search.diagnostics.trace_enabled` 设置为 `true`
 时，run 目录额外生成 `search_trace.jsonl`；该文件用于小样本机制审计，正式主
 实验保持关闭以免 I/O 干扰耗时比较。
+
+`escape_path_rate` 是兼容旧产物的 root-inclusive 指标。新实验应优先解释
+`post_root_escape_path_rate` 和 `post_root_old_prediction_error_path_rate`，它们
+排除原始输入本来就旧模型错误的情况。Strict-PBS 还记录
+`discarded_infeasible_state_rate`，用于核对硬过滤实际发生的比例。
 
 ## 10. 断点恢复、指标重算与结果整理
 
@@ -479,6 +498,11 @@ CSV 每个 run 一行，包含 dataset、model pair、method、seed，N/A/S/F/K�
 核心指标、四项质量指标、资源与 NLI 诊断、模型/config/manifest 身份、运行状态
 及关键依赖版本。整理器不计算相对 Base 指标；人工评估与标定报告仍使用各自的
 专用分析脚本。
+
+早期 `strict-pbs` 配置没有 `infeasible_state_policy`，实际语义是
+Feasibility-First。整理器会把这类历史 run 的 `method` 自动规范为
+`feasibility-first-pbs`，同时在 `configured_method` 保留原始名称。新的硬严格
+配置使用独立实验 ID `*-strict-pbs-hard`，不会复用历史结果目录。
 
 ### 10.4 AE-PBS 成对统计
 
@@ -574,7 +598,7 @@ CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
 
 ## 14. 完成检查
 
-- 44 份配置均能独立通过 schema 校验；
+- 48 份配置均能独立通过 schema 校验；
 - SST-2/RTE/MRPC/MR 各方法分别共享同一 test manifest；
 - manifest 不含模型预测或共同正确样本筛选；
 - 每个 run 满足 `total = successful + failed + skipped`；

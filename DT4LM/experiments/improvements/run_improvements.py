@@ -367,6 +367,17 @@ def _attack_command(config, run_dir, manifest, project_root):
                     str(epsilon["mode"]),
                 ]
             )
+            if search["ranking"] == "epsilon_pareto":
+                command.extend(
+                    [
+                        "--infeasible-state-policy",
+                        str(
+                            epsilon.get(
+                                "infeasible_state_policy", "feasibility_first"
+                            )
+                        ),
+                    ]
+                )
             if epsilon["mode"] == "adaptive":
                 command.extend(
                     [

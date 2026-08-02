@@ -23,6 +23,7 @@ def _state(
     cost=0.1,
     dynamic_score=0.0,
     generation_order=None,
+    old_is_correct=True,
 ):
     """Build the minimal state protocol consumed by pure ranking functions."""
 
@@ -32,6 +33,7 @@ def _state(
         new_error_margin=new_margin,
         modification_cost=cost,
         dynamic_score=dynamic_score,
+        old_is_correct=old_is_correct,
         generation_order=(state_id if generation_order is None else generation_order),
     )
 
@@ -114,6 +116,14 @@ class FrontierTests(unittest.TestCase):
 
         self.assertEqual([state.state_id for state in selected], [2, 1])
         self.assertEqual(metadata, {})
+
+    def test_strict_feasibility_discards_old_model_errors(self):
+        correct = _state(1, old_is_correct=True)
+        wrong = _state(2, old_is_correct=False)
+
+        retained = frontier.strictly_feasible_states([wrong, correct])
+
+        self.assertEqual([state.state_id for state in retained], [1])
 
 
 if __name__ == "__main__":

@@ -137,17 +137,25 @@ def _result(text, *, old_margin, new_margin, queries=1, success=False):
 class SearchHarness:
     """Bind deterministic transformations and model outputs to one search."""
 
-    def __init__(self, transformations, margins, beam_size=2):
+    def __init__(
+        self,
+        transformations,
+        margins,
+        beam_size=2,
+        epsilon_mode="adaptive",
+        infeasible_state_policy="feasibility_first",
+    ):
         self.goal = FakeGoalFunction()
         self.transformations = transformations
         self.margins = margins
         self.search = search_module.AsyncDifferentialBeamSearch(
             ranking="epsilon_pareto",
             beam_size=beam_size,
-            epsilon_mode="adaptive",
+            epsilon_mode=epsilon_mode,
             epsilon_initial_quantile=0.75,
             epsilon_initialization_max_expansions=2,
             epsilon_decay="quadratic",
+            infeasible_state_policy=infeasible_state_policy,
         )
         self.search.goal_function = self.goal
         self.search.get_transformations = self.get_transformations
@@ -276,7 +284,55 @@ class AsyncSearchTests(unittest.TestCase):
 
         self.assertEqual(final.goal_status, GoalFunctionResultStatus.SUCCEEDED)
         self.assertTrue(final.search_diagnostics["path_has_negative_old_margin"])
+        self.assertTrue(
+            final.search_diagnostics["path_has_post_root_negative_old_margin"]
+        )
         self.assertEqual(final.search_diagnostics["root_dynamic_rank"], 1)
+
+    def test_hard_strict_discards_an_infeasible_escape_state(self):
+        root = FakeAttackedText("root")
+        escape = FakeAttackedText("escape", modified_indices=(0,))
+        success = FakeAttackedText("success", modified_indices=(0, 1))
+        harness = SearchHarness(
+            {"root": (escape,), "escape": (success,)},
+            {
+                "escape": (-0.2, -0.1, False),
+                "success": (0.3, 0.4, True),
+            },
+            beam_size=1,
+            epsilon_mode="strict",
+            infeasible_state_policy="discard",
+        )
+
+        final = harness.search.perform_search(
+            _result(root, old_margin=0.5, new_margin=-0.5)
+        )
+
+        self.assertNotEqual(final.goal_status, GoalFunctionResultStatus.SUCCEEDED)
+        self.assertEqual(
+            final.search_diagnostics["discarded_infeasible_state_count"], 1
+        )
+
+    def test_hard_strict_allows_an_infeasible_root_to_recover(self):
+        root = FakeAttackedText("root")
+        success = FakeAttackedText("success", modified_indices=(0,))
+        harness = SearchHarness(
+            {"root": (success,)},
+            {"success": (0.3, 0.4, True)},
+            beam_size=1,
+            epsilon_mode="strict",
+            infeasible_state_policy="discard",
+        )
+
+        final = harness.search.perform_search(
+            _result(root, old_margin=-0.5, new_margin=-0.5)
+        )
+
+        self.assertEqual(final.goal_status, GoalFunctionResultStatus.SUCCEEDED)
+        self.assertTrue(final.search_diagnostics["path_has_negative_old_margin"])
+        self.assertFalse(
+            final.search_diagnostics["path_has_post_root_negative_old_margin"]
+        )
 
 
 if __name__ == "__main__":

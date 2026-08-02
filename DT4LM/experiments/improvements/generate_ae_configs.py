@@ -20,11 +20,24 @@ METHODS = {
         "epsilon": {"mode": "disabled"},
         "diagnostics": {"trace_enabled": False},
     },
+    "feasibility-first-pbs": {
+        "method": "async_frontier",
+        "ranking": "epsilon_pareto",
+        "beam_size": 5,
+        "epsilon": {
+            "mode": "strict",
+            "infeasible_state_policy": "feasibility_first",
+        },
+        "diagnostics": {"trace_enabled": False},
+    },
     "strict-pbs": {
         "method": "async_frontier",
         "ranking": "epsilon_pareto",
         "beam_size": 5,
-        "epsilon": {"mode": "strict"},
+        "epsilon": {
+            "mode": "strict",
+            "infeasible_state_policy": "discard",
+        },
         "diagnostics": {"trace_enabled": False},
     },
     "epsilon-greedy": {
@@ -36,6 +49,7 @@ METHODS = {
             "initial_quantile": 0.75,
             "initialization_max_expansions": 2,
             "decay": "quadratic",
+            "infeasible_state_policy": "feasibility_first",
         },
         "diagnostics": {"trace_enabled": False},
     },
@@ -48,6 +62,7 @@ METHODS = {
             "initial_quantile": 0.75,
             "initialization_max_expansions": 2,
             "decay": "quadratic",
+            "infeasible_state_policy": "feasibility_first",
         },
         "diagnostics": {"trace_enabled": False},
     },
@@ -66,8 +81,13 @@ def generate_configs():
         model_pair_id = str(base["models"]["id"])
         for method_name, search in METHODS.items():
             config = copy.deepcopy(base)
+            # Keep new hard-Strict runs separate from historical artifacts that
+            # used the old, feasibility-first meaning of "strict-pbs".
+            experiment_suffix = (
+                "strict-pbs-hard" if method_name == "strict-pbs" else method_name
+            )
             config["experiment"]["id"] = (
-                f"{dataset_id}-{model_pair_id}-{method_name}"
+                f"{dataset_id}-{model_pair_id}-{experiment_suffix}"
             )
             config["experiment"]["method"] = method_name
             config["attack"]["differential_objective"] = "dynamic"

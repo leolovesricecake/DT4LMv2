@@ -2,6 +2,11 @@
 
 > 本文是 `plan-260802-ae.md` 的代码落地方案。实施时以本文对接口、边界条件、产物协议和验收标准的定义为准，研究动机与数学方法仍以原计划为准。
 
+> 结果后修订：首轮所谓 Strict-PBS 实际采用“可行状态优先、空位由不可行状态
+> 填充”的政策，现更名为 Feasibility-First PBS。真正的 Strict-PBS 在 root
+> 首次扩展后永久丢弃旧模型预测错误的候选。两者通过
+> `epsilon.infeasible_state_policy` 显式区分。
+
 ## 1. 方向理解与结论
 
 AE-PBS 不再尝试设计更复杂的单一标量分数，而是改变差分样本的搜索方式：
@@ -36,7 +41,7 @@ AE-PBS 不再尝试设计更复杂的单一标量分数，而是改变差分样�
 
 **调整后采纳：**
 
-- 采纳“首轮无违反时不应立即永久退化”的判断，但不在预热期改用 Dynamic-Beam。实施为有界延迟初始化：在最多两次扩展中，首次观察到负 old margin 就立即确定 `epsilon_0`；尚未观察到违反时按 strict-PBS 排序。这样能发现第二层才出现的违反，又不在 Strict-PBS 与 AE-PBS 之间引入额外的 dynamic 排序混杂。
+- 采纳“首轮无违反时不应立即永久退化”的判断，但不在预热期改用 Dynamic-Beam。实施为有界延迟初始化：在最多两次扩展中，首次观察到负 old margin 就立即确定 `epsilon_0`；尚未观察到违反时按 Feasibility-First PBS 排序。这样能发现第二层才出现的违反，又不引入额外的 dynamic 排序混杂。
 - 主实验只保存首个扩展 margin 的 count/min/Q1/median/Q3/max 摘要，不将整个候选 margin 列表写入每样本核心结果；需要原始分布时使用小样本 trace。
 
 **不直接采纳：**
@@ -65,7 +70,7 @@ AE-PBS 不再尝试设计更复杂的单一标量分数，而是改变差分样�
 - 自适应模式使用有界延迟初始化，主配置 `initialization_max_expansions=2`。它是最大初始化窗口，不是强制预热轮数。
 - 每次初始化窗口内的扩展结束后，累积“通过文本约束、已取得模型输出”的唯一 query key 的 old margin。
 - 首次观察到任何 `old_margin < 0` 时，立即使用当前累积违反量 `-old_margin` 的 eta 分位数确定 `epsilon_0`，不必等满两次扩展。
-- 尚未初始化时，frontier 暂按 `epsilon=0` 的 strict-PBS 规则更新；不改用 Dynamic-Beam，不无约束保留状态。
+- 尚未初始化时，frontier 暂按 `epsilon=0` 的 Feasibility-First PBS 规则更新；不改用 Dynamic-Beam，不无约束保留状态。
 - 达到最大初始化扩展数仍无违反时，才固定 `epsilon_0=0`，并记录 `epsilon_zero_initialization=true`。
 - 分位数使用确定性线性插值：`h=(n-1)*eta`，在 `floor(h)` 与 `ceil(h)` 之间插值。这个口径避免 Python/NumPy 版本默认分位数方法不同。
 - `epsilon_0` 确定后，用当前全局 `q/Q` 计算已衰减的 epsilon，不从初始化完成时重置查询进度。
@@ -120,8 +125,9 @@ state_key = (
 ### 2.8 消融实验的归因边界
 
 - `DT4LM-Dynamic -> Dynamic-Beam` 隔离“异步多路径”收益。
-- `Dynamic-Beam -> Strict-PBS` 同时改变了排序表示和严格旧模型约束，只能归因为“从动态标量改为严格约束 Pareto”的整体效果，不能单独宣称为 Pareto 收益。
-- `Strict-PBS -> AE-PBS` 在同一 beam 大小下隔离 epsilon 放宽收益。
+- `Dynamic-Beam -> Feasibility-First PBS` 同时改变排序表示和可行优先政策，只能归因为这一整体政策的收益。
+- `Feasibility-First PBS -> AE-PBS` 在同一 beam 大小下隔离自适应 epsilon 的净作用。
+- `Strict-PBS -> Feasibility-First PBS` 隔离保留不可行状态的作用。
 - `Epsilon-Greedy -> AE-PBS` 在同一 epsilon-Pareto 政策下隔离 `K=1 -> K=5` 的多路径收益。
 - 若后续需要严格区分“约束”与“Pareto”，再添加 `Strict-Scalar-Beam` 作为补充消融，不将它纳入首轮必跑矩阵。
 
@@ -131,7 +137,8 @@ state_key = (
 
 - `non_top1_path_rate` = 首层根路径的 dynamic rank 大于 1 的 AE-PBS 成功数 / AE-PBS 成功数。
 - `ae_unique_non_top1_rate` = 首层根路径的 dynamic rank 大于 1 的 AE-PBS 独有成功数 / AE-PBS 独有成功数。
-- `escape_path_rate` 仍按成功路径中是否出现 `old_margin < 0` 统计；另外记录“旧模型实际预测错误”标志，便于审核 margin 等于 0 的边界情况。
+- `escape_path_rate` 保留历史口径，按包含 root 的成功路径是否出现 `old_margin < 0` 统计；同时记录 `post_root_escape_path_rate` 和 `post_root_old_prediction_error_path_rate`，作为判断搜索中间状态是否违反约束的主口径。
+- Strict-PBS 另外记录 `discarded_infeasible_state_count/rate`，用于核对旧模型预测错误的后继状态确实被永久丢弃。
 
 ### 2.10 修改成本的优化含义
 
@@ -164,7 +171,7 @@ AE-PBS 将修改率作为搜索过程中的 Pareto 目标，并在同一批次�
 | `experiments/improvements/run_improvements.py` | 将 `attack.search` 转换为 CLI 参数，并为可选 trace 设置输出路径。 | 未配置 `attack.search` 时不附加任何新参数，保持旧 run hash 和断点恢复行为。 |
 | `statistics/evaluate_improvements.py` | 聚合诊断指标，继续从 `queries_to_success` 产出作图原始数据。 | 旧结果没有诊断字段时输出 `null`，不拒绝重算旧 metrics。 |
 | `statistics/aggregate_improvements.py` | 增加搜索身份列和诊断聚合列。 | 旧实验规范化为 `legacy_greedy`，新旧结果可进入同一 CSV。 |
-| `experiments/improvements/configs/<dataset>/` | 添加 Dynamic-Beam、Strict-PBS、Epsilon-Greedy 和 AE-PBS 完整配置。 | 不改写已有 Base/LexiDT/SemDT 配置和产物。 |
+| `experiments/improvements/configs/<dataset>/` | 添加 Dynamic-Beam、Feasibility-First PBS、Strict-PBS、Epsilon-Greedy 和 AE-PBS 完整配置。 | 不改写已有 Base/LexiDT/SemDT 配置和产物。 |
 
 ### 3.3 明确不修改的位置
 
@@ -218,7 +225,8 @@ search:
 | DT4LM-Dynamic | `dynamic` | `legacy_greedy` | - | 1 | - |
 | LexiDT | `lexi` | `legacy_greedy` | - | 1 | - |
 | Dynamic-Beam | `dynamic` | `async_frontier` | `dynamic` | 5 | `disabled` |
-| Strict-PBS | `dynamic` | `async_frontier` | `epsilon_pareto` | 5 | `strict`，始终为 0 |
+| Feasibility-First PBS | `dynamic` | `async_frontier` | `epsilon_pareto` | 5 | `strict` + `feasibility_first` |
+| Strict-PBS | `dynamic` | `async_frontier` | `epsilon_pareto` | 5 | `strict` + `discard` |
 | Epsilon-Greedy | `dynamic` | `async_frontier` | `epsilon_pareto` | 1 | `adaptive` |
 | AE-PBS | `dynamic` | `async_frontier` | `epsilon_pareto` | 5 | `adaptive` |
 
@@ -235,6 +243,7 @@ PAIR recipe 新增以下参数：
 - `--epsilon-initial-quantile FLOAT`
 - `--epsilon-initialization-max-expansions INT`
 - `--epsilon-decay {linear,quadratic}`
+- `--infeasible-state-policy {feasibility_first,discard}`
 - `--search-trace-output PATH`，只在 `trace_enabled: true` 时由 runner 传入。
 
 参数校验使用条件规则：
@@ -244,6 +253,7 @@ PAIR recipe 新增以下参数：
 - `epsilon_pareto` 必须搭配 `strict` 或 `adaptive`。
 - `adaptive` 要求 `0 <= initial_quantile <= 1`、`initialization_max_expansions >= 1`，且 decay 为 `linear` 或 `quadratic`。
 - `strict` 不读取 quantile、initialization window 和 decay；配置中出现无效字段时直接报错，不静默忽略。
+- `discard` 只允许与 strict epsilon-Pareto 组合；adaptive epsilon 使用 `feasibility_first`。
 - `async_frontier` 首版必须使用 `differential_objective: dynamic`，以保证相同 query key 复用的兼容分数不受路径修改率影响；Static/LexiDT 仍使用旧贪心搜索。
 - `async_frontier` 首版只支持 `PAIR + kuleshov_var + DifferentialClassification`，其他 recipe 显式报出兼容性错误。
 
@@ -356,7 +366,8 @@ JSONL 结果 schema 升级时，读取端必须同时支持旧 schema 2 和新 s
 - `frontier_size_mean`、`frontier_size_max`、`rank1_size_mean`。
 - `frontier_modified_set_diversity_mean`、`frontier_depth_diversity_mean`。
 - `duplicate_state_rate`、`query_cache_hit_rate`、`budget_truncation_rate`。
-- `non_top1_path_rate`、`escape_path_rate`、`old_prediction_error_path_rate`。
+- `non_top1_path_rate`、root-inclusive 的历史 escape 口径、排除 root 的 post-root escape 口径。
+- `discarded_infeasible_state_count`、`discarded_infeasible_state_rate`。
 - `epsilon_zero_initialization_rate`、`epsilon_to_root_margin_ratio_median`、`epsilon_initialization_expansion_mean`。
 - `budget_penalized_queries_mean`、`budget_penalized_queries_median`，其中 failed 按 Q 计、successful 按 `queries_to_success` 计、skipped 不进入。
 
@@ -517,7 +528,7 @@ QPS 继续沿用已确认的论文口径：所有 successful/failed/skipped 样�
 | --- | --- | --- |
 | 首次扩展候选过多 | 在建立 frontier 前已消耗大量预算 | 严格经过 `get_results()` 截断，记录截断率；首版不改 Kuleshov 候选生成，避免混入第二个变量。 |
 | 重复路径浪费查询 | QPS 上升且结果受路径顺序影响 | 使用 query key 复用模型输出，使用包含修改历史的 state key 决定是否合并搜索状态。 |
-| 初始化窗口内没有负 old margin | AE-PBS 在该样本上退化为 Strict-PBS | 主配置允许最多两次扩展延迟初始化，报告 `epsilon_zero_initialization_rate` 并在 pilot 比较 1/2 次窗口。 |
+| 初始化窗口内没有负 old margin | AE-PBS 在该样本上退化为 Feasibility-First PBS | 主配置允许最多两次扩展延迟初始化，报告 `epsilon_zero_initialization_rate` 并在 pilot 比较 1/2 次窗口。 |
 | epsilon 过大 | frontier 充满无法恢复的旧模型错误路径 | 按样本候选违反分布自适应，随查询二次收紧，报告 `epsilon_0`、归一化 epsilon 与 escape 成功率。 |
 | 低修改率边界点长期占据 frontier | 浅层状态饥饿或无效循环 | 状态扩展后永久移出，按 state key 去重，记录深度与 modified-set 多样性。 |
 | 不同模型 logit 尺度不同 | 固定 epsilon 不可迁移 | epsilon 仅用同一旧模型、同一样本初始化窗口内的违反分布初始化；跨样本分析使用归一化 epsilon 诊断，不直接解释 margin 绝对值。 |

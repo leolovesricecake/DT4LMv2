@@ -41,6 +41,7 @@ attack:
       initial_quantile: 0.75
       initialization_max_expansions: 2
       decay: quadratic
+      infeasible_state_policy: feasibility_first
     diagnostics:
       trace_enabled: false
 semantic:

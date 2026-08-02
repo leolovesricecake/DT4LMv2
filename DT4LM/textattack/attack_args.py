@@ -545,6 +545,7 @@ class _CommandLineAttackArgs:
     epsilon_initial_quantile: float = 0.75
     epsilon_initialization_max_expansions: int = 2
     epsilon_decay: str = "quadratic"
+    infeasible_state_policy: str = "feasibility_first"
     search_trace_output: str = None
     semantic_constraint: str = "original"
     semantic_threshold_file: str = None
@@ -724,6 +725,12 @@ class _CommandLineAttackArgs:
             choices=("linear", "quadratic"),
             default=default_obj.epsilon_decay,
             help="Query-budget-driven adaptive epsilon decay.",
+        )
+        parser.add_argument(
+            "--infeasible-state-policy",
+            choices=("feasibility_first", "discard"),
+            default=default_obj.infeasible_state_policy,
+            help="Retain ranked violations or discard old-model errors.",
         )
         parser.add_argument(
             "--search-trace-output",

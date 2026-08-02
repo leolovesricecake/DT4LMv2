@@ -106,6 +106,21 @@ def constraint_violation(old_correct_margin: float, epsilon: float) -> float:
     return max(0.0, -epsilon - old_correct_margin)
 
 
+def strictly_feasible_states(states: Sequence) -> List:
+    """Keep only states where the old model actually predicts the label."""
+
+    retained = []
+    for state in states:
+        old_is_correct = getattr(state, "old_is_correct", None)
+        if not isinstance(old_is_correct, bool):
+            raise TypeError(
+                "Strict feasibility requires a boolean old_is_correct field."
+            )
+        if old_is_correct:
+            retained.append(state)
+    return retained
+
+
 def _validate_states(states: Sequence) -> None:
     """Validate the minimal state protocol required by frontier ranking."""
 
