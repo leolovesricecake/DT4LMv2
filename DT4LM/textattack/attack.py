@@ -151,6 +151,10 @@ class Attack:
 
         # Give search method access to functions for getting transformations and evaluating them
         self.search_method.get_transformations = self.get_transformations
+        self._last_transformation_stats = {"generated": 0, "constraint_passed": 0}
+        self.search_method.get_last_transformation_stats = (
+            self.get_last_transformation_stats
+        )
         # Give search method access to self.goal_function for model query count, etc.
         self.search_method.goal_function = self.goal_function
         # The search method only needs access to the first argument. The second is only used
@@ -294,7 +298,14 @@ class Attack:
             )
 
         if self.use_transformation_cache:
-            cache_key = tuple([current_text] + sorted(kwargs.items()))
+            if hasattr(self.search_method, "transformation_cache_key"):
+                # Multi-path searches may reach identical text through states
+                # with different future modification permissions.
+                cache_key = self.search_method.transformation_cache_key(
+                    current_text, kwargs
+                )
+            else:
+                cache_key = tuple([current_text] + sorted(kwargs.items()))
             if utils.hashable(cache_key) and cache_key in self.transformation_cache:
                 # promote transformed_text to the top of the LRU cache
                 self.transformation_cache[cache_key] = self.transformation_cache[
@@ -312,9 +323,21 @@ class Attack:
                 current_text, original_text, **kwargs
             )
 
-        return self.filter_transformations(
+        filtered_texts = self.filter_transformations(
             transformed_texts, current_text, original_text
         )
+        # Search diagnostics read these counts without changing the transformation
+        # return contract used by every existing search method.
+        self._last_transformation_stats = {
+            "generated": len(transformed_texts),
+            "constraint_passed": len(filtered_texts),
+        }
+        return filtered_texts
+
+    def get_last_transformation_stats(self):
+        """Return counts from the most recent transformation/filter call."""
+
+        return dict(self._last_transformation_stats)
 
     def _filter_transformations_uncached(
         self, transformed_texts, current_text, original_text=None

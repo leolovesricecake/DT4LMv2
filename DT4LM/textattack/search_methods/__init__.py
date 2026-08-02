@@ -17,6 +17,7 @@ from .improved_genetic_algorithm import ImprovedGeneticAlgorithm
 from .particle_swarm_optimization import ParticleSwarmOptimization
 from .leap import LEAP
 from .comparator_greedy_search import ComparatorGreedySearch
+from .async_differential_beam_search import AsyncDifferentialBeamSearch
 from .differential_comparators import (
     LexicographicComparator,
     ScalarComparator,

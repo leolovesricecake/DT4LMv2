@@ -130,6 +130,10 @@ experiments/improvements/configs/
     albertbasev1-v2-semdt-openai.yaml
     albertbasev1-v2-semdt-hf.yaml
     albertbasev1-v2-combined-openai.yaml
+    albertbasev1-v2-dynamic-beam.yaml
+    albertbasev1-v2-strict-pbs.yaml
+    albertbasev1-v2-epsilon-greedy.yaml
+    albertbasev1-v2-ae-pbs.yaml
   rte/
     ...
   mrpc/
@@ -205,11 +209,7 @@ evaluation:
 
 `torch<2.6` 加载 `.bin` 会因 CVE-2025-32434 被新版 Transformers 拒绝。不要
 降级 Transformers 或修改其安全检查；使用上面的官方 PyTorch 2.6 CUDA 11.8
-安装命令，或把配置指向具有 safetensors 权重的等价 checkpoint。评估器会在
-加载 BERTScore 模型前检查这一点，并把明确的修复说明写入 `quality.json`。
-依据可查阅 [CVE 公告](https://github.com/advisories/GHSA-53q9-r3pm-6pq6)、
-[Transformers 安全说明](https://github.com/huggingface/transformers/security) 和
-[PyTorch 历史版本安装命令](https://docs.pytorch.org/get-started/previous-versions/)。
+安装命令，或把配置指向具有 safetensors 权重的等价 checkpoint。
 
 ## 5. 生成随机样本 manifest
 
@@ -317,6 +317,55 @@ CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-semdt-openai.yaml
 ```
 
+### 8.1 运行 AE-PBS 与消融方法
+
+AE-PBS 使用独立的异步 frontier 搜索，不会改变 Base、Static、LexiDT 或 SemDT
+的默认搜索器。首轮需要在同一个 test manifest 上分别运行四份完整配置：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
+  experiments/improvements/configs/sst2/albertbasev1-v2-dynamic-beam.yaml
+
+CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
+  experiments/improvements/configs/sst2/albertbasev1-v2-strict-pbs.yaml
+
+CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
+  experiments/improvements/configs/sst2/albertbasev1-v2-epsilon-greedy.yaml
+
+CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
+  experiments/improvements/configs/sst2/albertbasev1-v2-ae-pbs.yaml
+```
+
+四种配置分别隔离异步多路径、严格 Pareto、单路径自适应 epsilon 和完整
+AE-PBS。主配置中的搜索块为：
+
+```yaml
+attack:
+  differential_objective: dynamic
+  search:
+    method: async_frontier
+    ranking: epsilon_pareto
+    beam_size: 5
+    epsilon:
+      mode: adaptive
+      initial_quantile: 0.75
+      initialization_max_expansions: 2
+      decay: quadratic
+    diagnostics:
+      trace_enabled: false
+```
+
+这些参数应先在与正式 test manifest 不相交的 validation/pilot 样本上确定。参数
+冻结后再运行正式 test，不能根据 test 结果回选 `beam_size`、分位数、初始化窗口
+或衰减方式。仓库中的 16 份新配置可由下列脚本从各数据集 Base 配置重新生成：
+
+```bash
+python experiments/improvements/generate_ae_configs.py
+```
+
+生成器会覆盖同名 AE-PBS 配置；只有在有意同步 Base 路径或公共评估设置时才应
+执行，并在运行前检查差异。
+
 ## 9. 检查实验产物
 
 ```text
@@ -348,6 +397,7 @@ outputs/dt4lm-improvements/runs/<dataset>/<models.id>/<experiment.id>/
 - `model_pair_queries`、初始/搜索查询分解；
 - 成功样本的 `queries_to_success`；
 - 修改率、耗时、显存与可选 NLI 诊断。
+- AE-PBS 的 epsilon、frontier 宽度、路径深度、去重/缓存计数和成功路径机制诊断。
 
 `core.json` 包含 PaperGSR、完整样本生成率、Success@100/500/1000、SQ-AUC、
 AMR、QPS、状态分布及 `resources`。`success_queries.json` 以等长的
@@ -359,6 +409,12 @@ AMR、QPS、状态分布及 `resources`。`success_queries.json` 以等长的
 
 QPS 口径为全部 manifest 样本产生的模型对查询总数除以成功生成数，失败和
 skipped 的查询也进入分子；成功数为 0 时为 `null`。
+
+AE-PBS 运行还会在 `core.json` 中记录 frontier、路径和 epsilon 的聚合诊断，
+以及预算惩罚查询成本：成功样本取 `queries_to_success`，失败样本按完整查询预算
+计，skipped 不进入。将 `attack.search.diagnostics.trace_enabled` 设置为 `true`
+时，run 目录额外生成 `search_trace.jsonl`；该文件用于小样本机制审计，正式主
+实验保持关闭以免 I/O 干扰耗时比较。
 
 ## 10. 断点恢复、指标重算与结果整理
 
@@ -423,6 +479,25 @@ CSV 每个 run 一行，包含 dataset、model pair、method、seed，N/A/S/F/K�
 核心指标、四项质量指标、资源与 NLI 诊断、模型/config/manifest 身份、运行状态
 及关键依赖版本。整理器不计算相对 Base 指标；人工评估与标定报告仍使用各自的
 专用分析脚本。
+
+### 10.4 AE-PBS 成对统计
+
+Base 与 AE-PBS 必须使用相同 dataset、model pair、query budget 和 manifest。
+攻击与指标完成后，按 dataset index 做严格配对分析：
+
+```bash
+python statistics/compare_search_methods.py \
+  --baseline outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/sst2-albertbasev1-v2-base \
+  --candidate outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/sst2-albertbasev1-v2-ae-pbs \
+  --o outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/ae-pbs-vs-base.json \
+  --bootstrap-samples 10000 \
+  --seed 765
+```
+
+输出包含三态列联表、Base/AE-PBS 独有成功、共同成功与共同失败、McNemar 精确
+检验、配对 bootstrap、共同成功样本的查询数/修改率比较，以及全部 attackable
+样本的预算惩罚查询比较。AE-PBS 独有成功还会报告非 dynamic top-1 路径和临时
+负 old margin 路径占比。
 
 ## 11. 轨迹审计
 
@@ -499,7 +574,7 @@ CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
 
 ## 14. 完成检查
 
-- 28 份配置均能独立通过 schema 校验；
+- 44 份配置均能独立通过 schema 校验；
 - SST-2/RTE/MRPC/MR 各方法分别共享同一 test manifest；
 - manifest 不含模型预测或共同正确样本筛选；
 - 每个 run 满足 `total = successful + failed + skipped`；
@@ -510,5 +585,7 @@ CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
 - 质量指标失败后攻击与核心产物仍可用；
 - v3 metrics 仅有 `core.json`、`success_queries.json` 和 `quality.json`；
 - `statistics/aggregate_improvements.py` 能生成每个 run 一行的汇总 CSV；
+- AE-PBS 的 resolved config、JSONL、core 和 summary 搜索身份完全一致；
+- Base 与 AE-PBS 成对分析使用相同 manifest hash 和 query budget；
 - 单 run 产物中没有 Base 路径、相对差值或扩展决策；
 - Git 状态中不存在 secret 配置或 API key。

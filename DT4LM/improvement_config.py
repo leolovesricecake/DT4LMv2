@@ -10,6 +10,9 @@ SCHEMA_VERSION = 2
 OBJECTIVES = frozenset(("dynamic", "static", "lexi"))
 SEMANTIC_CONSTRAINTS = frozenset(("original", "nli"))
 THRESHOLD_SOURCES = frozenset(("none", "manual", "calibrated"))
+SEARCH_METHODS = frozenset(("legacy_greedy", "async_frontier"))
+FRONTIER_RANKINGS = frozenset(("dynamic", "epsilon_pareto"))
+EPSILON_MODES = frozenset(("disabled", "strict", "adaptive"))
 
 
 def _require(mapping: Mapping[str, Any], key: str, context: str) -> Any:
@@ -95,8 +98,11 @@ def validate_experiment_config(config: Mapping[str, Any]) -> None:
 
     models = _require_mapping(config, "models")
     _require(models, "id", "models")
-    model_spec(config, "old")
-    model_spec(config, "new")
+    for role in ("old", "new"):
+        spec = model_spec(config, role)
+        training_seed = spec.get("training_seed")
+        if training_seed is not None and not isinstance(training_seed, int):
+            raise ValueError(f"models.{role}.training_seed must be an integer or null.")
 
     attack = _require_mapping(config, "attack")
     for key in (
@@ -118,6 +124,114 @@ def validate_experiment_config(config: Mapping[str, Any]) -> None:
         )
     if not isinstance(attack["query_budget"], int) or attack["query_budget"] <= 0:
         raise ValueError("attack.query_budget must be a positive integer.")
+
+    search = attack.get("search")
+    if search is not None:
+        if not isinstance(search, dict):
+            raise ValueError("attack.search must be a mapping when provided.")
+        method = _require(search, "method", "attack.search")
+        if method not in SEARCH_METHODS:
+            raise ValueError(
+                f"attack.search.method must be one of {sorted(SEARCH_METHODS)!r}."
+            )
+        if method == "legacy_greedy" and set(search) != {"method"}:
+            raise ValueError(
+                "legacy_greedy attack.search accepts only the method field."
+            )
+        if method == "async_frontier":
+            allowed_search_fields = {
+                "method",
+                "ranking",
+                "beam_size",
+                "epsilon",
+                "diagnostics",
+            }
+            if set(search) != allowed_search_fields:
+                raise ValueError(
+                    "async_frontier attack.search fields must be exactly "
+                    f"{sorted(allowed_search_fields)!r}."
+                )
+            if attack["recipe"] != "kuleshov_var":
+                raise ValueError("async_frontier requires attack.recipe: kuleshov_var.")
+            if attack["differential_objective"] != "dynamic":
+                raise ValueError(
+                    "async_frontier requires attack.differential_objective: dynamic."
+                )
+            for key in ("ranking", "beam_size", "epsilon", "diagnostics"):
+                _require(search, key, "attack.search")
+            if search["ranking"] not in FRONTIER_RANKINGS:
+                raise ValueError(
+                    "attack.search.ranking must be one of "
+                    f"{sorted(FRONTIER_RANKINGS)!r}."
+                )
+            if not isinstance(search["beam_size"], int) or search["beam_size"] <= 0:
+                raise ValueError("attack.search.beam_size must be a positive integer.")
+            epsilon = search["epsilon"]
+            if not isinstance(epsilon, dict):
+                raise ValueError("attack.search.epsilon must be a mapping.")
+            epsilon_mode = _require(epsilon, "mode", "attack.search.epsilon")
+            if epsilon_mode not in EPSILON_MODES:
+                raise ValueError(
+                    "attack.search.epsilon.mode must be one of "
+                    f"{sorted(EPSILON_MODES)!r}."
+                )
+            expected_epsilon_fields = (
+                {
+                    "mode",
+                    "initial_quantile",
+                    "initialization_max_expansions",
+                    "decay",
+                }
+                if epsilon_mode == "adaptive"
+                else {"mode"}
+            )
+            if set(epsilon) != expected_epsilon_fields:
+                raise ValueError(
+                    f"{epsilon_mode} epsilon fields must be exactly "
+                    f"{sorted(expected_epsilon_fields)!r}."
+                )
+            if search["ranking"] == "dynamic" and epsilon_mode != "disabled":
+                raise ValueError("Dynamic frontier ranking requires disabled epsilon.")
+            if search["ranking"] == "epsilon_pareto" and epsilon_mode == "disabled":
+                raise ValueError(
+                    "Epsilon-Pareto frontier ranking requires strict or adaptive epsilon."
+                )
+            if epsilon_mode == "adaptive":
+                for key in (
+                    "initial_quantile",
+                    "initialization_max_expansions",
+                    "decay",
+                ):
+                    _require(epsilon, key, "attack.search.epsilon")
+                if not isinstance(epsilon["initial_quantile"], (int, float)) or not (
+                    0.0 <= float(epsilon["initial_quantile"]) <= 1.0
+                ):
+                    raise ValueError(
+                        "attack.search.epsilon.initial_quantile must lie in [0, 1]."
+                    )
+                if (
+                    not isinstance(epsilon["initialization_max_expansions"], int)
+                    or epsilon["initialization_max_expansions"] <= 0
+                ):
+                    raise ValueError(
+                        "attack.search.epsilon.initialization_max_expansions must "
+                        "be a positive integer."
+                    )
+                if epsilon["decay"] not in {"linear", "quadratic"}:
+                    raise ValueError(
+                        "attack.search.epsilon.decay must be linear or quadratic."
+                    )
+            diagnostics = search["diagnostics"]
+            if not isinstance(diagnostics, dict) or set(diagnostics) != {
+                "trace_enabled"
+            }:
+                raise ValueError(
+                    "attack.search.diagnostics accepts only trace_enabled."
+                )
+            if not isinstance(diagnostics["trace_enabled"], bool):
+                raise ValueError(
+                    "attack.search.diagnostics.trace_enabled must be boolean."
+                )
 
     semantic = _require_mapping(config, "semantic")
     threshold = semantic.get("threshold")

@@ -20,13 +20,23 @@ IDENTITY_COLUMNS = [
     "model_pair",
     "method",
     "seed",
+    "attack_seed",
     "experiment_id",
     "old_model",
     "old_revision",
+    "old_model_training_seed",
     "new_model",
     "new_revision",
+    "new_model_training_seed",
     "recipe",
     "differential_objective",
+    "search_method",
+    "frontier_ranking",
+    "beam_size",
+    "epsilon_mode",
+    "epsilon_initial_quantile",
+    "epsilon_initialization_max_expansions",
+    "epsilon_decay",
     "semantic_constraint",
     "threshold_source",
     "threshold_backend",
@@ -71,6 +81,26 @@ CORE_COLUMNS = [
     "successful_queries_median",
     "successful_queries_q1",
     "successful_queries_q3",
+    "budget_penalized_query_count",
+    "budget_penalized_queries_mean",
+    "budget_penalized_queries_median",
+    "search_diagnostic_sample_count",
+    "search_expansions_mean",
+    "search_max_depth_mean",
+    "frontier_size_mean",
+    "frontier_size_max",
+    "rank1_size_mean",
+    "frontier_modified_set_diversity_mean",
+    "frontier_depth_diversity_mean",
+    "duplicate_state_rate",
+    "query_cache_hit_rate",
+    "budget_truncation_rate",
+    "non_top1_path_rate",
+    "escape_path_rate",
+    "old_prediction_error_path_rate",
+    "epsilon_zero_initialization_rate",
+    "epsilon_to_root_margin_ratio_median",
+    "epsilon_initialization_expansion_mean",
     "successful_nli_sample_count",
     "successful_nli_entailment_mean",
     "successful_nli_contradiction_mean",
@@ -216,6 +246,13 @@ def _model_revision(config, key):
     return value.get("revision") if isinstance(value, dict) else None
 
 
+def _model_training_seed(config, key):
+    """Read optional training-seed provenance from a normalized model spec."""
+
+    value = config["models"][key]
+    return value.get("training_seed") if isinstance(value, dict) else None
+
+
 def _stage_status(status, stage):
     """Return one pipeline-stage state without assuming status.json is complete."""
 
@@ -344,6 +381,8 @@ def build_row(run_dir, input_dir):
 
     experiment = config["experiment"]
     attack = config["attack"]
+    search = attack.get("search") or {"method": "legacy_greedy"}
+    epsilon = search.get("epsilon") or {}
     threshold = (config.get("semantic") or {}).get("threshold") or {}
     calibration = config.get("calibration") or {}
     judge = calibration.get("judge") or {}
@@ -358,13 +397,25 @@ def build_row(run_dir, input_dir):
         "model_pair": config["models"]["id"],
         "method": experiment["method"],
         "seed": experiment["seed"],
+        "attack_seed": experiment["seed"],
         "experiment_id": experiment["id"],
         "old_model": _model_value(config, "old"),
         "old_revision": _model_revision(config, "old"),
+        "old_model_training_seed": _model_training_seed(config, "old"),
         "new_model": _model_value(config, "new"),
         "new_revision": _model_revision(config, "new"),
+        "new_model_training_seed": _model_training_seed(config, "new"),
         "recipe": attack["recipe"],
         "differential_objective": attack["differential_objective"],
+        "search_method": search["method"],
+        "frontier_ranking": search.get("ranking"),
+        "beam_size": search.get("beam_size"),
+        "epsilon_mode": epsilon.get("mode"),
+        "epsilon_initial_quantile": epsilon.get("initial_quantile"),
+        "epsilon_initialization_max_expansions": epsilon.get(
+            "initialization_max_expansions"
+        ),
+        "epsilon_decay": epsilon.get("decay"),
         "semantic_constraint": attack["semantic_constraint"],
         "threshold_source": threshold.get("source"),
         "threshold_backend": threshold.get("backend") or judge.get("backend"),

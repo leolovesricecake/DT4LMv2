@@ -60,7 +60,7 @@ class JSONLLogger(Logger):
         initial_state = _initial_state(original)
         initial_queries = int(getattr(original, "num_queries", 1) or 1)
         row = {
-            "schema_version": 2,
+            "schema_version": 3,
             "dataset_index": attrs.get(
                 "dataset_index",
                 original.attacked_text.attack_attrs.get("dataset_index"),
@@ -105,6 +105,9 @@ class JSONLLogger(Logger):
             "nli_profile": getattr(result, "nli_profile", None),
             "wall_clock_seconds": getattr(result, "wall_clock_seconds", None),
             "peak_vram_bytes": getattr(result, "peak_vram_bytes", None),
+            "search_diagnostics": getattr(
+                perturbed, "search_diagnostics", None
+            ),
         }
         self._rows.append(row)
         self._flushed = False

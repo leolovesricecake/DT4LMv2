@@ -3,7 +3,10 @@
 import textattack
 from textattack.goal_functions import DifferentialClassification
 from textattack.model_args import ModelArgs
-from textattack.search_methods import ComparatorGreedySearch
+from textattack.search_methods import (
+    AsyncDifferentialBeamSearch,
+    ComparatorGreedySearch,
+)
 from textattack.search_methods.differential_comparators import (
     comparator_for_objective,
 )
@@ -125,11 +128,12 @@ class PAIR2024(AttackRecipe):
             if (
                 args.differential_objective != "dynamic"
                 or args.semantic_constraint != "original"
+                or args.differential_search != "legacy_greedy"
             ):
                 raise ValueError(
-                    "Static, LexiDT, and SemDT are first-round implementations "
-                    "for --base-recipe kuleshov_var. Other recipes currently "
-                    "support only dynamic/original compatibility mode."
+                    "Static, LexiDT, SemDT, and asynchronous differential search "
+                    "require --base-recipe kuleshov_var. Other recipes currently "
+                    "support only dynamic/original/legacy_greedy compatibility mode."
                 )
             # Existing LEAP/FastGA/etc. pair commands retain their own search
             # state machine. Only the differential goal is rebound, matching
@@ -139,9 +143,27 @@ class PAIR2024(AttackRecipe):
             base_attack.search_method.get_goal_results = goal_function.get_results
             return base_attack
 
-        search_method = ComparatorGreedySearch(
-            comparator_for_objective(args.differential_objective)
-        )
+        if args.differential_search == "legacy_greedy":
+            search_method = ComparatorGreedySearch(
+                comparator_for_objective(args.differential_objective)
+            )
+        else:
+            if args.differential_objective != "dynamic":
+                raise ValueError(
+                    "Asynchronous differential search requires "
+                    "--differential-objective dynamic in its first version."
+                )
+            search_method = AsyncDifferentialBeamSearch(
+                ranking=args.differential_frontier_ranking,
+                beam_size=args.differential_beam_size,
+                epsilon_mode=args.epsilon_mode,
+                epsilon_initial_quantile=args.epsilon_initial_quantile,
+                epsilon_initialization_max_expansions=(
+                    args.epsilon_initialization_max_expansions
+                ),
+                epsilon_decay=args.epsilon_decay,
+                trace_output=args.search_trace_output,
+            )
         return textattack.Attack(
             goal_function,
             constraints,

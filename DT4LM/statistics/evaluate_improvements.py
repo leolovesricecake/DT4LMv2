@@ -110,6 +110,126 @@ def _quartiles(values):
     return first, third
 
 
+def _search_diagnostic_metrics(records, statuses):
+    """Aggregate optional AE-PBS diagnostics without rejecting legacy rows."""
+
+    diagnostics = [
+        row.get("search_diagnostics")
+        for row, status in zip(records, statuses)
+        if status != "skipped" and isinstance(row.get("search_diagnostics"), dict)
+    ]
+    successful_diagnostics = [
+        row.get("search_diagnostics")
+        for row, status in zip(records, statuses)
+        if status == "successful"
+        and isinstance(row.get("search_diagnostics"), dict)
+    ]
+    adaptive = [
+        item for item in diagnostics if item.get("epsilon_mode") == "adaptive"
+    ]
+    adaptive_initialized = [
+        item
+        for item in adaptive
+        if item.get("epsilon_zero_initialization") is not None
+    ]
+
+    def values(name, source=diagnostics):
+        return [
+            float(item[name])
+            for item in source
+            if item.get(name) is not None
+        ]
+
+    def average(name, source=diagnostics):
+        observed = values(name, source)
+        return mean(observed) if observed else None
+
+    duplicate_states = sum(
+        int(item.get("duplicate_state_count") or 0) for item in diagnostics
+    )
+    constraint_passed = sum(
+        int(item.get("constraint_passed_candidate_count") or 0)
+        for item in diagnostics
+    )
+    cache_hits = sum(
+        int(item.get("query_cache_hit_count") or 0) for item in diagnostics
+    )
+    cache_misses = sum(
+        int(item.get("query_cache_miss_count") or 0) for item in diagnostics
+    )
+    truncated = sum(
+        int(item.get("budget_truncated_candidate_count") or 0)
+        for item in diagnostics
+    )
+    non_top1 = [
+        item.get("root_dynamic_rank") > 1
+        for item in successful_diagnostics
+        if item.get("root_dynamic_rank") is not None
+    ]
+    escaped = [
+        bool(item.get("path_has_negative_old_margin"))
+        for item in successful_diagnostics
+        if item.get("path_has_negative_old_margin") is not None
+    ]
+    old_prediction_errors = [
+        bool(item.get("path_has_old_prediction_error"))
+        for item in successful_diagnostics
+        if item.get("path_has_old_prediction_error") is not None
+    ]
+    epsilon_ratios = values("epsilon_to_root_margin_ratio", adaptive)
+    initialization_expansions = values(
+        "epsilon_initialization_expansion", adaptive
+    )
+    return {
+        "search_diagnostic_sample_count": len(diagnostics),
+        "search_expansions_mean": average("expansion_count"),
+        "search_max_depth_mean": average("max_depth"),
+        "frontier_size_mean": average("frontier_size_mean"),
+        "frontier_size_max": (
+            max(values("frontier_size_max"))
+            if values("frontier_size_max")
+            else None
+        ),
+        "rank1_size_mean": average("rank1_size_mean"),
+        "frontier_modified_set_diversity_mean": average(
+            "frontier_modified_set_diversity_mean"
+        ),
+        "frontier_depth_diversity_mean": average(
+            "frontier_depth_diversity_mean"
+        ),
+        "duplicate_state_rate": (
+            duplicate_states / constraint_passed if constraint_passed else None
+        ),
+        "query_cache_hit_rate": (
+            cache_hits / (cache_hits + cache_misses)
+            if cache_hits + cache_misses
+            else None
+        ),
+        "budget_truncation_rate": (
+            truncated / cache_misses if cache_misses else None
+        ),
+        "non_top1_path_rate": mean(non_top1) if non_top1 else None,
+        "escape_path_rate": mean(escaped) if escaped else None,
+        "old_prediction_error_path_rate": (
+            mean(old_prediction_errors) if old_prediction_errors else None
+        ),
+        "epsilon_zero_initialization_rate": (
+            mean(
+                bool(item.get("epsilon_zero_initialization"))
+                for item in adaptive_initialized
+            )
+            if adaptive_initialized
+            else None
+        ),
+        "epsilon_to_root_margin_ratio_median": (
+            median(epsilon_ratios) if epsilon_ratios else None
+        ),
+        "epsilon_initialization_expansion_mean": (
+            mean(initialization_expansions) if initialization_expansions else None
+        ),
+    }
+
+
 def core_metrics(records, manifest, *, success_budgets, query_budget):
     """Compute core metrics and compact per-success query columns."""
 
@@ -149,6 +269,7 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
 
     total_queries = 0
     success_queries = []
+    budget_penalized_queries = []
     success_query_columns = {"dataset_index": [], "queries_to_success": []}
     for row, status in zip(records, statuses):
         queries = int(row["model_pair_queries"])
@@ -164,6 +285,7 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
                     "queries_to_success exceeds recorded queries or budget."
                 )
             success_queries.append(query_to_success)
+            budget_penalized_queries.append(query_to_success)
             # Columnar storage avoids repeating field names for every success.
             success_query_columns["dataset_index"].append(
                 int(row["dataset_index"])
@@ -171,6 +293,10 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
             success_query_columns["queries_to_success"].append(query_to_success)
         elif query_to_success is not None:
             raise ValueError("Failed and skipped rows require null queries_to_success.")
+        elif status == "failed":
+            # Penalize exhausted and early-frontier failures equally at the
+            # configured budget when comparing success and query efficiency.
+            budget_penalized_queries.append(int(query_budget))
 
     q1, q3 = _quartiles(success_queries)
     successful_nli = [
@@ -226,7 +352,15 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
         ),
         "successful_queries_q1": q1,
         "successful_queries_q3": q3,
+        "budget_penalized_query_count": len(budget_penalized_queries),
+        "budget_penalized_queries_mean": (
+            mean(budget_penalized_queries) if budget_penalized_queries else None
+        ),
+        "budget_penalized_queries_median": (
+            median(budget_penalized_queries) if budget_penalized_queries else None
+        ),
     }
+    result.update(_search_diagnostic_metrics(records, statuses))
     for budget in success_budgets:
         numerator = sum(value <= budget for value in success_queries)
         result[f"success_at_{budget}"] = (

@@ -352,6 +352,40 @@ def _attack_command(config, run_dir, manifest, project_root):
         command, "--second-model-revision", models["old"].get("revision")
     )
 
+    search = attack.get("search")
+    if search is not None:
+        command.extend(["--differential-search", str(search["method"])])
+        if search["method"] == "async_frontier":
+            epsilon = search["epsilon"]
+            command.extend(
+                [
+                    "--differential-frontier-ranking",
+                    str(search["ranking"]),
+                    "--differential-beam-size",
+                    str(search["beam_size"]),
+                    "--epsilon-mode",
+                    str(epsilon["mode"]),
+                ]
+            )
+            if epsilon["mode"] == "adaptive":
+                command.extend(
+                    [
+                        "--epsilon-initial-quantile",
+                        str(epsilon["initial_quantile"]),
+                        "--epsilon-initialization-max-expansions",
+                        str(epsilon["initialization_max_expansions"]),
+                        "--epsilon-decay",
+                        str(epsilon["decay"]),
+                    ]
+                )
+            if search["diagnostics"]["trace_enabled"]:
+                command.extend(
+                    [
+                        "--search-trace-output",
+                        str(run_dir / "search_trace.jsonl"),
+                    ]
+                )
+
     if attack["semantic_constraint"] == "nli":
         nli = config["semantic"]["nli"]
         command.extend(
@@ -509,6 +543,10 @@ def main():
     else:
         _set_stage(status_path, "attack", "running")
         try:
+            # A restarted attack must not append to a trace left by a failed run.
+            trace_path = run_dir / "search_trace.jsonl"
+            if trace_path.exists():
+                trace_path.unlink()
             subprocess.run(
                 _attack_command(config, run_dir, manifest, PROJECT_ROOT),
                 cwd=PROJECT_ROOT,

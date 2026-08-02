@@ -538,6 +538,14 @@ class _CommandLineAttackArgs:
     lambda1: float = 0
     lambda2: float = 0
     differential_objective: str = "dynamic"
+    differential_search: str = "legacy_greedy"
+    differential_frontier_ranking: str = "dynamic"
+    differential_beam_size: int = 5
+    epsilon_mode: str = "disabled"
+    epsilon_initial_quantile: float = 0.75
+    epsilon_initialization_max_expansions: int = 2
+    epsilon_decay: str = "quadratic"
+    search_trace_output: str = None
     semantic_constraint: str = "original"
     semantic_threshold_file: str = None
     candidate_log: str = None
@@ -674,6 +682,53 @@ class _CommandLineAttackArgs:
             choices=("dynamic", "static", "lexi"),
             default=default_obj.differential_objective,
             help="Objective used by the differential classification goal.",
+        )
+        parser.add_argument(
+            "--differential-search",
+            choices=("legacy_greedy", "async_frontier"),
+            default=default_obj.differential_search,
+            help="PAIR search controller; legacy_greedy preserves existing behavior.",
+        )
+        parser.add_argument(
+            "--differential-frontier-ranking",
+            choices=("dynamic", "epsilon_pareto"),
+            default=default_obj.differential_frontier_ranking,
+            help="Ranking policy for asynchronous differential search.",
+        )
+        parser.add_argument(
+            "--differential-beam-size",
+            type=int,
+            default=default_obj.differential_beam_size,
+            help="Maximum number of unexpanded asynchronous frontier states.",
+        )
+        parser.add_argument(
+            "--epsilon-mode",
+            choices=("disabled", "strict", "adaptive"),
+            default=default_obj.epsilon_mode,
+            help="Old-model margin constraint used by epsilon-Pareto ranking.",
+        )
+        parser.add_argument(
+            "--epsilon-initial-quantile",
+            type=float,
+            default=default_obj.epsilon_initial_quantile,
+            help="Violation quantile used to initialize adaptive epsilon.",
+        )
+        parser.add_argument(
+            "--epsilon-initialization-max-expansions",
+            type=int,
+            default=default_obj.epsilon_initialization_max_expansions,
+            help="Maximum delayed-initialization expansion window.",
+        )
+        parser.add_argument(
+            "--epsilon-decay",
+            choices=("linear", "quadratic"),
+            default=default_obj.epsilon_decay,
+            help="Query-budget-driven adaptive epsilon decay.",
+        )
+        parser.add_argument(
+            "--search-trace-output",
+            default=default_obj.search_trace_output,
+            help="Optional JSONL expansion trace for small mechanism studies.",
         )
         parser.add_argument(
             "--semantic-constraint",
