@@ -24,7 +24,7 @@ from improvement_config import load_experiment_config  # noqa: E402
 
 
 RESULT_STATUSES = frozenset(("successful", "failed", "skipped"))
-METRICS_SCHEMA_VERSION = 3
+METRICS_SCHEMA_VERSION = 4
 INITIAL_STATES = frozenset(
     ("both_correct", "new_correct_old_wrong", "both_wrong", "already_differential")
 )
@@ -111,7 +111,7 @@ def _quartiles(values):
 
 
 def _search_diagnostic_metrics(records, statuses):
-    """Aggregate optional AE-PBS diagnostics without rejecting legacy rows."""
+    """Aggregate FF-PBS mechanism counters using their paper definitions."""
 
     diagnostics = [
         row.get("search_diagnostics")
@@ -124,13 +124,13 @@ def _search_diagnostic_metrics(records, statuses):
         if status == "successful"
         and isinstance(row.get("search_diagnostics"), dict)
     ]
-    adaptive = [
-        item for item in diagnostics if item.get("epsilon_mode") == "adaptive"
+    feasibility_diagnostics = [
+        item for item in diagnostics if item.get("ranking") != "dynamic"
     ]
-    adaptive_initialized = [
+    hard_diagnostics = [
         item
-        for item in adaptive
-        if item.get("epsilon_zero_initialization") is not None
+        for item in feasibility_diagnostics
+        if item.get("infeasible_state_policy") == "discard"
     ]
 
     def values(name, source=diagnostics):
@@ -143,6 +143,9 @@ def _search_diagnostic_metrics(records, statuses):
     def average(name, source=diagnostics):
         observed = values(name, source)
         return mean(observed) if observed else None
+
+    def total(name, source=diagnostics):
+        return sum(float(item.get(name) or 0.0) for item in source)
 
     duplicate_states = sum(
         int(item.get("duplicate_state_count") or 0) for item in diagnostics
@@ -166,53 +169,70 @@ def _search_diagnostic_metrics(records, statuses):
         for item in successful_diagnostics
         if item.get("root_dynamic_rank") is not None
     ]
-    escaped = [
-        bool(item.get("path_has_negative_old_margin"))
-        for item in successful_diagnostics
-        if item.get("path_has_negative_old_margin") is not None
-    ]
-    old_prediction_errors = [
-        bool(item.get("path_has_old_prediction_error"))
-        for item in successful_diagnostics
-        if item.get("path_has_old_prediction_error") is not None
-    ]
-    post_root_escaped = [
-        bool(item.get("path_has_post_root_negative_old_margin"))
-        for item in successful_diagnostics
-        if item.get("path_has_post_root_negative_old_margin") is not None
-    ]
-    post_root_old_prediction_errors = [
+    recover_paths = [
         bool(item.get("path_has_post_root_old_prediction_error"))
         for item in successful_diagnostics
         if item.get("path_has_post_root_old_prediction_error") is not None
     ]
-    discarded_infeasible_states = sum(
-        int(item.get("discarded_infeasible_state_count") or 0)
-        for item in diagnostics
+    recover_diagnostics = [
+        item
+        for item in successful_diagnostics
+        if item.get("path_has_post_root_old_prediction_error") is True
+    ]
+    if any(
+        item.get("first_post_root_old_prediction_error_depth") is None
+        or item.get("first_recovery_depth_after_old_prediction_error") is None
+        for item in recover_diagnostics
+    ):
+        raise ValueError("Recovering success diagnostics require both path depths.")
+    first_infeasible_depths = values(
+        "first_post_root_old_prediction_error_depth", recover_diagnostics
     )
-    candidate_states = sum(
-        int(item.get("candidate_state_count") or 0) for item in diagnostics
+    first_recovery_depths = values(
+        "first_recovery_depth_after_old_prediction_error", recover_diagnostics
     )
-    epsilon_ratios = values("epsilon_to_root_margin_ratio", adaptive)
-    initialization_expansions = values(
-        "epsilon_initialization_expansion", adaptive
+    recovery_spans = [
+        recovery - infeasible
+        for infeasible, recovery in zip(
+            first_infeasible_depths, first_recovery_depths
+        )
+    ]
+    frontier_updates = total("frontier_update_count")
+    frontier_slots = total("frontier_state_slot_count")
+    feasibility_updates = total("frontier_update_count", feasibility_diagnostics)
+    feasibility_slots = total(
+        "frontier_state_slot_count", feasibility_diagnostics
     )
+    hard_candidates = total("candidate_state_count", hard_diagnostics)
+    hard_discards = total("discarded_infeasible_state_count", hard_diagnostics)
     return {
         "search_diagnostic_sample_count": len(diagnostics),
         "search_expansions_mean": average("expansion_count"),
         "search_max_depth_mean": average("max_depth"),
-        "frontier_size_mean": average("frontier_size_mean"),
+        "frontier_update_count": int(frontier_updates),
+        "frontier_state_slot_count": int(frontier_slots),
+        "frontier_size_mean": (
+            frontier_slots / frontier_updates if frontier_updates else None
+        ),
         "frontier_size_max": (
             max(values("frontier_size_max"))
             if values("frontier_size_max")
             else None
         ),
-        "rank1_size_mean": average("rank1_size_mean"),
-        "frontier_modified_set_diversity_mean": average(
-            "frontier_modified_set_diversity_mean"
+        "rank1_size_mean": (
+            total("rank1_state_count") / frontier_updates
+            if frontier_updates
+            else None
         ),
-        "frontier_depth_diversity_mean": average(
-            "frontier_depth_diversity_mean"
+        "frontier_modified_set_diversity_mean": (
+            total("modified_diversity_ratio_sum") / frontier_updates
+            if frontier_updates
+            else None
+        ),
+        "frontier_depth_diversity_mean": (
+            total("depth_diversity_ratio_sum") / frontier_updates
+            if frontier_updates
+            else None
         ),
         "duplicate_state_rate": (
             duplicate_states / constraint_passed if constraint_passed else None
@@ -226,50 +246,69 @@ def _search_diagnostic_metrics(records, statuses):
             truncated / cache_misses if cache_misses else None
         ),
         "non_top1_path_rate": mean(non_top1) if non_top1 else None,
-        "escape_path_rate": mean(escaped) if escaped else None,
-        "root_inclusive_escape_path_rate": (
-            mean(escaped) if escaped else None
-        ),
-        "old_prediction_error_path_rate": (
-            mean(old_prediction_errors) if old_prediction_errors else None
-        ),
-        "root_inclusive_old_prediction_error_path_rate": (
-            mean(old_prediction_errors) if old_prediction_errors else None
-        ),
-        "post_root_escape_path_rate": (
-            mean(post_root_escaped) if post_root_escaped else None
-        ),
+        "recover_path_count": sum(recover_paths),
         "post_root_old_prediction_error_path_rate": (
-            mean(post_root_old_prediction_errors)
-            if post_root_old_prediction_errors
+            mean(recover_paths) if recover_paths else None
+        ),
+        "recover_first_infeasible_depth_mean": (
+            mean(first_infeasible_depths) if first_infeasible_depths else None
+        ),
+        "recover_first_infeasible_depth_median": (
+            median(first_infeasible_depths) if first_infeasible_depths else None
+        ),
+        "recover_first_recovery_depth_mean": (
+            mean(first_recovery_depths) if first_recovery_depths else None
+        ),
+        "recover_first_recovery_depth_median": (
+            median(first_recovery_depths) if first_recovery_depths else None
+        ),
+        "recover_depth_span_mean": (
+            mean(recovery_spans) if recovery_spans else None
+        ),
+        "recover_depth_span_median": (
+            median(recovery_spans) if recovery_spans else None
+        ),
+        "success_path_depth_mean": average(
+            "success_path_depth", successful_diagnostics
+        ),
+        "success_path_depth_median": (
+            median(values("success_path_depth", successful_diagnostics))
+            if values("success_path_depth", successful_diagnostics)
             else None
         ),
-        "discarded_infeasible_state_count": discarded_infeasible_states,
-        "discarded_infeasible_state_rate": (
-            discarded_infeasible_states / candidate_states
-            if candidate_states
+        "infeasible_fill_event_rate": (
+            total("infeasible_fill_event_count", feasibility_diagnostics)
+            / feasibility_updates
+            if feasibility_updates
             else None
         ),
-        "epsilon_zero_initialization_rate": (
-            mean(
-                bool(item.get("epsilon_zero_initialization"))
-                for item in adaptive_initialized
-            )
-            if adaptive_initialized
+        "infeasible_retained_state_rate": (
+            total("infeasible_retained_state_count", feasibility_diagnostics)
+            / feasibility_slots
+            if feasibility_slots
             else None
         ),
-        "epsilon_to_root_margin_ratio_median": (
-            median(epsilon_ratios) if epsilon_ratios else None
+        "hard_discarded_infeasible_state_count": (
+            int(hard_discards) if hard_diagnostics else None
         ),
-        "epsilon_initialization_expansion_mean": (
-            mean(initialization_expansions) if initialization_expansions else None
+        "hard_discard_rate": (
+            hard_discards / hard_candidates
+            if hard_candidates
+            else None
         ),
+        "frontier_sort_seconds": total("frontier_sort_seconds"),
     }
 
 
 def core_metrics(records, manifest, *, success_budgets, query_budget):
-    """Compute core metrics and compact per-success query columns."""
+    """Compute paper metrics and complete columnar per-sample query data."""
 
+    if any(row.get("schema_version") != 4 for row in records):
+        raise ValueError("Every result row must use schema version 4.")
+    if success_budgets != sorted(set(success_budgets)) or any(
+        budget <= 0 or budget > query_budget for budget in success_budgets
+    ):
+        raise ValueError("Success budgets must be unique, increasing, and within Q.")
     expected_indices = list(manifest["selected_indices"])
     observed_indices = [int(row["dataset_index"]) for row in records]
     if observed_indices != expected_indices:
@@ -307,13 +346,20 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
     total_queries = 0
     success_queries = []
     budget_penalized_queries = []
-    success_query_columns = {"dataset_index": [], "queries_to_success": []}
+    query_columns = {
+        "dataset_index": [],
+        "result_status": [],
+        "model_pair_queries": [],
+        "queries_to_success": [],
+        "budget_penalized_queries": [],
+    }
     for row, status in zip(records, statuses):
         queries = int(row["model_pair_queries"])
         if queries <= 0:
             raise ValueError("model_pair_queries must be positive for every sample.")
         total_queries += queries
         query_to_success = row.get("queries_to_success")
+        penalized_queries = None
         if status == "successful":
             if not isinstance(query_to_success, int) or query_to_success <= 0:
                 raise ValueError("Successful rows require positive queries_to_success.")
@@ -323,17 +369,22 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
                 )
             success_queries.append(query_to_success)
             budget_penalized_queries.append(query_to_success)
-            # Columnar storage avoids repeating field names for every success.
-            success_query_columns["dataset_index"].append(
-                int(row["dataset_index"])
-            )
-            success_query_columns["queries_to_success"].append(query_to_success)
+            penalized_queries = query_to_success
         elif query_to_success is not None:
             raise ValueError("Failed and skipped rows require null queries_to_success.")
         elif status == "failed":
             # Penalize exhausted and early-frontier failures equally at the
             # configured budget when comparing success and query efficiency.
             budget_penalized_queries.append(int(query_budget))
+            penalized_queries = int(query_budget)
+
+        # Equal-length columns preserve the complete manifest order and support
+        # later curve, QPS, and paired cost analyses without reading JSONL.
+        query_columns["dataset_index"].append(int(row["dataset_index"]))
+        query_columns["result_status"].append(status)
+        query_columns["model_pair_queries"].append(queries)
+        query_columns["queries_to_success"].append(query_to_success)
+        query_columns["budget_penalized_queries"].append(penalized_queries)
 
     q1, q3 = _quartiles(success_queries)
     successful_nli = [
@@ -353,8 +404,8 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
         "paper_gsr": (
             success_count / attackable_count if attackable_count else None
         ),
-        "sample_generation_rate": success_count / total,
-        "preexisting_differential_rate": skipped_count / total,
+        "sample_generation_rate": success_count / total if total else None,
+        "preexisting_differential_rate": skipped_count / total if total else None,
         "initial_state_counts": {
             state: initial_states.get(state, 0) for state in sorted(INITIAL_STATES)
         },
@@ -390,8 +441,13 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
         "successful_queries_q1": q1,
         "successful_queries_q3": q3,
         "budget_penalized_query_count": len(budget_penalized_queries),
-        "budget_penalized_queries_mean": (
+        "bpqc": (
             mean(budget_penalized_queries) if budget_penalized_queries else None
+        ),
+        "normalized_bpqc": (
+            mean(budget_penalized_queries) / query_budget
+            if budget_penalized_queries
+            else None
         ),
         "budget_penalized_queries_median": (
             median(budget_penalized_queries) if budget_penalized_queries else None
@@ -403,21 +459,23 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
         result[f"success_at_{budget}"] = (
             numerator / attackable_count if attackable_count else None
         )
-        result[f"sample_success_at_{budget}"] = numerator / total
 
     # Each success at query q contributes to C(b) for q <= b <= query_budget.
-    result["sq_auc"] = (
+    result["success_query_auc"] = (
         sum(query_budget - value + 1 for value in success_queries)
         / (attackable_count * query_budget)
         if attackable_count
         else None
     )
-    success_query_artifact = {
+    query_artifact = {
         "schema_version": METRICS_SCHEMA_VERSION,
+        "sample_count": total,
+        "attackable_sample_count": attackable_count,
         "successful_sample_count": len(success_queries),
-        "data": success_query_columns,
+        "query_budget": int(query_budget),
+        "data": query_columns,
     }
-    return result, success_query_artifact
+    return result, query_artifact
 
 
 def _lcs_length(left, right):
@@ -666,8 +724,8 @@ def run_quality_metrics(records, quality_config, output_dir, project_root):
     return summary
 
 
-def resource_metrics(records, profile=None):
-    """Keep target-model and NLI resource costs visibly separate."""
+def resource_metrics(records, *, frontier_sort_seconds=0.0, profile=None):
+    """Aggregate end-to-end, memory, and frontier-ranking resource costs."""
 
     success_count = sum(_record_status(row) == "successful" for row in records)
     wall_seconds = sum(
@@ -682,6 +740,12 @@ def resource_metrics(records, profile=None):
             (int(row.get("peak_vram_bytes") or 0) for row in records),
             default=0,
         ),
+        "frontier_sort_seconds": float(frontier_sort_seconds),
+        "frontier_sort_time_ratio": (
+            float(frontier_sort_seconds) / wall_seconds
+            if wall_seconds
+            else None
+        ),
     }
     if profile:
         resources["nli"] = profile
@@ -694,7 +758,7 @@ def run_core(args, config, records):
     with open(args.manifest, encoding="utf-8") as handle:
         manifest = json.load(handle)
     core_config = config["evaluation"]["core"]
-    core, success_queries = core_metrics(
+    core, query_data = core_metrics(
         records,
         manifest,
         success_budgets=core_config["success_budgets"],
@@ -704,11 +768,15 @@ def run_core(args, config, records):
     if args.nli_profile and Path(args.nli_profile).exists():
         with open(args.nli_profile, encoding="utf-8") as handle:
             profile = json.load(handle)
-    core["resources"] = resource_metrics(records, profile)
+    core["resources"] = resource_metrics(
+        records,
+        frontier_sort_seconds=core.get("frontier_sort_seconds") or 0.0,
+        profile=profile,
+    )
     core["evaluation_runtime"] = evaluation_runtime()
     output_dir = Path(args.output_dir)
     _write_json_atomic(output_dir / "core.json", core)
-    _write_json_atomic(output_dir / "success_queries.json", success_queries)
+    _write_json_atomic(output_dir / "query_data.json", query_data)
     legacy_resources = output_dir / "resources.json"
     if legacy_resources.exists():
         legacy_resources.unlink()

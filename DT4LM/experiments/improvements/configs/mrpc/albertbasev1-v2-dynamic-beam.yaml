@@ -36,8 +36,6 @@ attack:
     method: async_frontier
     ranking: dynamic
     beam_size: 5
-    epsilon:
-      mode: disabled
     diagnostics:
       trace_enabled: false
 semantic:

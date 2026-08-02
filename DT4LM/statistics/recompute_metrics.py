@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Recompute schema-v3 metrics for every completed experiment below a root."""
+"""Recompute schema-v4 metrics for every completed experiment below a root."""
 
 import argparse
 import json

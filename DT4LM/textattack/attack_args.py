@@ -541,11 +541,7 @@ class _CommandLineAttackArgs:
     differential_search: str = "legacy_greedy"
     differential_frontier_ranking: str = "dynamic"
     differential_beam_size: int = 5
-    epsilon_mode: str = "disabled"
-    epsilon_initial_quantile: float = 0.75
-    epsilon_initialization_max_expansions: int = 2
-    epsilon_decay: str = "quadratic"
-    infeasible_state_policy: str = "feasibility_first"
+    infeasible_state_policy: str = "fill"
     search_trace_output: str = None
     semantic_constraint: str = "original"
     semantic_threshold_file: str = None
@@ -692,7 +688,7 @@ class _CommandLineAttackArgs:
         )
         parser.add_argument(
             "--differential-frontier-ranking",
-            choices=("dynamic", "epsilon_pareto"),
+            choices=("dynamic", "feasibility_pareto", "feasibility_mnew"),
             default=default_obj.differential_frontier_ranking,
             help="Ranking policy for asynchronous differential search.",
         )
@@ -703,34 +699,10 @@ class _CommandLineAttackArgs:
             help="Maximum number of unexpanded asynchronous frontier states.",
         )
         parser.add_argument(
-            "--epsilon-mode",
-            choices=("disabled", "strict", "adaptive"),
-            default=default_obj.epsilon_mode,
-            help="Old-model margin constraint used by epsilon-Pareto ranking.",
-        )
-        parser.add_argument(
-            "--epsilon-initial-quantile",
-            type=float,
-            default=default_obj.epsilon_initial_quantile,
-            help="Violation quantile used to initialize adaptive epsilon.",
-        )
-        parser.add_argument(
-            "--epsilon-initialization-max-expansions",
-            type=int,
-            default=default_obj.epsilon_initialization_max_expansions,
-            help="Maximum delayed-initialization expansion window.",
-        )
-        parser.add_argument(
-            "--epsilon-decay",
-            choices=("linear", "quadratic"),
-            default=default_obj.epsilon_decay,
-            help="Query-budget-driven adaptive epsilon decay.",
-        )
-        parser.add_argument(
             "--infeasible-state-policy",
-            choices=("feasibility_first", "discard"),
+            choices=("fill", "discard"),
             default=default_obj.infeasible_state_policy,
-            help="Retain ranked violations or discard old-model errors.",
+            help="Use old-model errors only as frontier fillers or discard them.",
         )
         parser.add_argument(
             "--search-trace-output",

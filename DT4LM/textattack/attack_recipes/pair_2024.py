@@ -1,4 +1,4 @@
-"""PAIR recipe for DT4LM dynamic, static, LexiDT, and SemDT experiments."""
+"""PAIR recipe for DT4LM objectives and bounded-frontier experiments."""
 
 import textattack
 from textattack.goal_functions import DifferentialClassification
@@ -156,12 +156,6 @@ class PAIR2024(AttackRecipe):
             search_method = AsyncDifferentialBeamSearch(
                 ranking=args.differential_frontier_ranking,
                 beam_size=args.differential_beam_size,
-                epsilon_mode=args.epsilon_mode,
-                epsilon_initial_quantile=args.epsilon_initial_quantile,
-                epsilon_initialization_max_expansions=(
-                    args.epsilon_initialization_max_expansions
-                ),
-                epsilon_decay=args.epsilon_decay,
                 infeasible_state_policy=args.infeasible_state_policy,
                 trace_output=args.search_trace_output,
             )

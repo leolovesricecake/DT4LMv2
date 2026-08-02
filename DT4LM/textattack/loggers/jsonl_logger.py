@@ -60,7 +60,7 @@ class JSONLLogger(Logger):
         initial_state = _initial_state(original)
         initial_queries = int(getattr(original, "num_queries", 1) or 1)
         row = {
-            "schema_version": 3,
+            "schema_version": 4,
             "dataset_index": attrs.get(
                 "dataset_index",
                 original.attacked_text.attack_attrs.get("dataset_index"),
@@ -78,9 +78,6 @@ class JSONLLogger(Logger):
             "skip_reason": (
                 "already_differential" if status == "skipped" else None
             ),
-            # Keep the legacy boolean during migration; all new metrics use
-            # result_status so skipped and failed cannot be conflated.
-            "success": status == "successful",
             "model_pair_queries": result.num_queries,
             "initial_model_pair_queries": initial_queries,
             "search_model_pair_queries": max(0, result.num_queries - initial_queries),

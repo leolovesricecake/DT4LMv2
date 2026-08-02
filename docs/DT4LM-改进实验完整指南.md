@@ -1,38 +1,21 @@
-# DT4LM 改进实验完整指南
+# FF-PBS 实验完整指南
 
-本文说明如何从数据预处理开始，依次完成模型训练、随机样本清单生成、SemDT
-阈值标定、单项实验运行、自动评估和人工评估。除特别说明外，所有命令均从
-`DT4LM/` 目录执行：
+本指南对应 `plan-260802-ffpbs.md`。当前论文主方法是 FF-PBS，活动实验不再包含
+SemDT、LexiDT、Static、AE-PBS 或自适应 epsilon 方法。
+
+## 1. 运行位置
+
+所有命令默认从 `DT4LM/` 目录执行：
 
 ```bash
 cd DT4LM
 ```
 
-## 1. 安装环境
+实验使用一份完整 YAML 配置，不做配置继承，也不用一条命令运行整个矩阵。
 
-```bash
-conda env create -f DT4LM.yaml
-conda activate DT4LM
-# Transformers 4.57 会安全地拒绝 torch<2.6 加载 pickle .bin 权重。
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
-  --index-url https://download.pytorch.org/whl/cu118
-pip install -e .
-```
+## 2. 准备数据与模型
 
-确认本地入口：
-
-```bash
-python -m textattack --help
-python -m textattack semdt-calibrate --help
-python -c "import torch; assert tuple(map(int, torch.__version__.split('+')[0].split('.')[:2])) >= (2, 6)"
-```
-
-OpenAI-compatible judge 需要 `openai`；本地 HF judge 需要足够显存。BLEU 和
-METEOR 依赖 NLTK，BERTScore 依赖 `bert-score` 及显式配置的本地模型。
-
-## 2. 准备数据
-
-原仓库的数据预处理 notebook 已转换为统一脚本：
+首先使用 `datasets/preprocess_dataset.py` 生成本地 Hugging Face Dataset。例如：
 
 ```bash
 python datasets/preprocess_dataset.py sst2
@@ -41,349 +24,122 @@ python datasets/preprocess_dataset.py mrpc
 python datasets/preprocess_dataset.py mr
 ```
 
-默认输出：
-
-```text
-outputs/datasets/sst2
-outputs/datasets/rte
-outputs/datasets/mrpc
-outputs/datasets/mr
-```
-
-GLUE 的公开 test split 没有有效标签，因此脚本沿用原 notebook 的思路，将有标签
-数据以固定种子分层划分为 train、validation 和 test。四个数据集的冻结字段
-协议为：
-
-| 数据集 | 文本字段 | 任务 |
-| --- | --- | --- |
-| SST-2 | `sentence` | 二分类情感分析 |
-| RTE | `premise`, `hypothesis` | 蕴含判断 |
-| MRPC | `sentence1`, `sentence2` | 复述/语义等价判断 |
-| MR | `text` | 二分类电影评论情感分析 |
-
-manifest 准备和正式运行都会在加载受测模型前核对这些列。配置声明与本地数据
-不一致时会立即失败，不能依靠 TextAttack 自动猜测字段。
-
-显式指定输出路径：
+默认输出在 `outputs/datasets/<dataset>/`。可以通过 `--output` 显式指定路径：
 
 ```bash
 python datasets/preprocess_dataset.py sst2 \
-  --output-dir /data/dt4lm/sst2 \
-  --seed 42 \
-  --test-size 0.1 \
-  --validation-size 0.1
+  --output outputs/datasets/sst2
 ```
 
-输出目录已存在时脚本会拒绝覆盖。
-
-## 3. 准备新旧模型
-
-格式：`bash experiments/finetune/<file> <DATASET> <DEVICE>`
-
-- `DATASET`：`sst2`、`rte`、`mrpc` 或 `mr`
-- `DEVICE`：显卡号，`-1` 表示 CPU
-
-```bash
-bash experiments/finetune/train_albertbasev1.sh mrpc 1
-bash experiments/finetune/train_albertbasev2.sh mrpc 1
-
-bash experiments/finetune/train_debertav1base.sh mr 1
-bash experiments/finetune/train_debertav3base.sh mr 1
-
-bash experiments/finetune/train_gpt1.sh sst2 1
-bash experiments/finetune/train_gpt2.sh sst2 1
-```
-
-checkpoint：
-
-```text
-outputs/finetuned/<model>_<dataset>/best_model
-```
-
-已有 checkpoint 时可跳过训练，直接修改目标实验 YAML 中：
+新旧模型必须已经针对同一任务完成微调，并在配置中指定：
 
 ```yaml
 models:
   id: albertbasev1-v2
   old:
-    name_or_path: outputs/albertbasev1_sst2/best_model
+    name_or_path: outputs/finetuned/albertbasev1_sst2/best_model
     revision: null
   new:
-    name_or_path: outputs/albertbasev2_sst2/best_model
+    name_or_path: outputs/finetuned/albertbasev2_sst2/best_model
     revision: null
 ```
 
-更换任一 checkpoint 或 revision 时必须更换 `models.id`，避免 run 与标定产物
-混入旧模型对。
+`models.id` 是稳定的 model-pair 身份，决定实验输出命名空间。
 
-## 4. 选择一份完整实验配置
+## 3. 活动方法矩阵
 
-一个 YAML 表示一次完整实验，不再组合“数据集配置”和“方法配置”：
+每个 dataset/model-pair 有六份主实验/消融配置：
 
-```text
-experiments/improvements/configs/
-  sst2/
-    albertbasev1-v2-base.yaml
-    albertbasev1-v2-static.yaml
-    albertbasev1-v2-lexidt.yaml
-    albertbasev1-v2-semdt-manual.yaml
-    albertbasev1-v2-semdt-openai.yaml
-    albertbasev1-v2-semdt-hf.yaml
-    albertbasev1-v2-combined-openai.yaml
-    albertbasev1-v2-dynamic-beam.yaml
-    albertbasev1-v2-feasibility-first-pbs.yaml
-    albertbasev1-v2-strict-pbs.yaml
-    albertbasev1-v2-epsilon-greedy.yaml
-    albertbasev1-v2-ae-pbs.yaml
-  rte/
-    ...
-  mrpc/
-    ...
-  mr/
-    ...
+| 方法 | ranking | K | 不可行状态 |
+| --- | --- | ---: | --- |
+| Base | 原 DT4LM dynamic greedy | 1 | 由原目标间接处理 |
+| Dynamic-Beam | `dynamic` | 5 | 不特殊处理 |
+| FF-Pareto-Greedy | `feasibility_pareto` | 1 | `fill` |
+| Hard-PBS | `feasibility_pareto` | 5 | `discard` |
+| FF-MNew | `feasibility_mnew` | 5 | `fill` |
+| FF-PBS | `feasibility_pareto` | 5 | `fill` |
+
+`fill` 表示先保留旧模型预测正确的状态，只在 frontier 仍有空位时使用最小违反状态
+补位。`discard` 表示查询后永久删除旧模型预测错误的 post-root 状态。
+
+FF-MNew 与 FF-PBS 使用相同的 `fill` 政策，但可行候选只按 `m_new` 降序排序，
+不使用修改率作为第二目标。
+
+## 4. 生成配置
+
+每个 model pair 只需先写好 `<model-pair>-base.yaml`，然后执行：
+
+```bash
+python experiments/improvements/generate_ffpbs_configs.py
 ```
 
-每份配置都显式包含：
+生成器会：
 
-- 实验 ID、方法和随机种子；
-- 数据路径、测试 split、抽样规模和 manifest 路径；
-- `models.id` 及新旧 checkpoint；
-- recipe、差分目标、语义约束和查询预算；
-- NLI 模型及阈值来源；
-- 可选标定后端及全部标定超参数；
-- Success@B 预算和各质量指标配置。
+1. 扫描 `experiments/improvements/configs/*/*-base.yaml`；
+2. 为每个 Base 生成五个核心搜索对照和两个额外宽度配置；
+3. 统一设置 `Success@100,200,...,1000`；
+4. 检查文件名与 `models.id` 是否一致。
 
-### 4.1 测试样本数
+另外生成 `ff-pbs-k3` 和 `ff-pbs-k10`，与可复用为 `K=1` 的
+FF-Pareto-Greedy 及主方法 `K=5` 共同覆盖参数敏感性实验。
 
-```yaml
-dataset:
-  evaluation:
-    split: test
-    sample_size: 1000
-    sample_seed: 765
-```
+当前四个数据集、ALBERT/GPT 两类 model pair 共有 64 份活动配置。新增 DeBERTa
+model pair 时，添加对应 Base 配置后重新运行生成器即可。
 
-`sample_size` 缺省、为 `null`、0 或负数时使用完整 split；正数时随机无放回
-抽取至多该数量。首轮四个数据集都配置为 1000，数据不足时自动全量保留。
-抽样不查询模型，也不筛选新旧模型共同预测正确的样本。
+## 5. 准备固定 manifest
 
-### 4.2 标定源样本数
-
-SemDT 标定配置中：
-
-```yaml
-calibration:
-  source_sampling:
-    split: train
-    sample_size: 500
-    sample_seed: 765
-```
-
-该值语义与测试抽样一致。
-
-### 4.3 BERTScore 本地模型
-
-正式运行前必须把每份配置中的路径改为真实本地目录：
-
-```yaml
-evaluation:
-  quality:
-    bertscore:
-      enabled: true
-      model_name_or_path: /absolute/path/to/roberta-large
-      num_layers: 17
-      allow_remote_download: false
-      device: cuda
-      batch_size: 32
-      idf: false
-      rescale_with_baseline: false
-      baseline_path: null
-```
-
-`allow_remote_download: false` 时不会隐式下载。暂时不计算 BERTScore 时，应在
-该实验 YAML 中设置 `enabled: false`，而不是依赖命令行临时开关。
-
-本地目录还必须满足以下二者之一：
-
-- 包含 `model.safetensors` 或分片 `*.safetensors`，Transformers 会优先使用；
-- 只有 `pytorch_model.bin` 时，运行环境必须使用 `torch>=2.6`。
-
-`torch<2.6` 加载 `.bin` 会因 CVE-2025-32434 被新版 Transformers 拒绝。不要
-降级 Transformers 或修改其安全检查；使用上面的官方 PyTorch 2.6 CUDA 11.8
-安装命令，或把配置指向具有 safetensors 权重的等价 checkpoint。
-
-## 5. 生成随机样本 manifest
-
-Base、Static 和 LexiDT 配置只生成 test manifest：
+同一 dataset 的所有 model pair 和方法使用同一份 test manifest：
 
 ```bash
 bash experiments/improvements/prepare_manifests.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-base.yaml
 ```
 
-启用标定的配置还会生成独立的 train source manifest：
+`dataset.evaluation.sample_size` 的规则是：
 
-```bash
-bash experiments/improvements/prepare_manifests.sh \
-  experiments/improvements/configs/sst2/albertbasev1-v2-semdt-openai.yaml
-```
+- 缺省、`null` 或非正数：使用全部 test 样本；
+- 正整数：按 `sample_seed` 随机抽取至多该数量；
+- 测试集不足 1000 条时：使用全部样本。
 
-产物位于：
+manifest 只绑定 dataset/split/抽样结果，不绑定 model pair。
 
-```text
-outputs/dt4lm-improvements/sample_sets/sst2/test-n1000-seed765.json
-outputs/dt4lm-improvements/sample_sets/sst2/train-n500-seed765.json
-```
+## 6. 运行单个实验
 
-sample manifest 与模型无关，只记录数据指纹、split、总体数量、请求/实际数量、
-seed、抽样算法、固定索引顺序和 hash。同一数据集所有方法复用同一 test
-manifest，从而支持逐样本成对比较。已有 manifest 内容不一致时程序拒绝覆盖；
-应换新路径，不能手工修改冻结文件。
-
-## 6. 配置 Judge
-
-复制模板，并使用修正后的 `.secret.yaml` 后缀：
-
-```bash
-cp configs/semantic_judge.example.yaml configs/openai.secret.yaml
-cp configs/semantic_judge.example.yaml configs/hf.secret.yaml
-```
-
-OpenAI-compatible 示例：
-
-```yaml
-backend: openai
-openai:
-  model: your-model
-  base_url: https://your-endpoint/v1
-  api_key: your-key
-  timeout: 60
-  max_retries: 3
-  max_new_tokens: 32
-```
-
-本地 HF 示例：
-
-```yaml
-backend: hf
-hf:
-  model: /models/Qwen2.5-7B-Instruct
-  revision: null
-  device: cuda
-  dtype: float16
-  batch_size: 4
-  max_retries: 3
-  max_new_tokens: 32
-```
-
-两种后端天然独立，每次实验只使用一个。`*.secret.yaml` 和旧拼写
-`*.secert.yaml` 均被 Git 忽略；新配置统一使用正确拼写。
-
-## 7. 标定 SemDT 阈值
-
-OpenAI 后端：
-
-```bash
-bash experiments/improvements/calibrate_semdt.sh \
-  experiments/improvements/configs/sst2/albertbasev1-v2-semdt-openai.yaml
-```
-
-本地 HF 后端：
-
-```bash
-bash experiments/improvements/calibrate_semdt.sh \
-  experiments/improvements/configs/sst2/albertbasev1-v2-semdt-hf.yaml
-```
-
-配置会显式控制候选源样本数、1000 条分层候选、800/200 冻结划分、0.01
-网格步长、0.95 precision 下限、验证集最少 100 个语义保持正例和最多 2000
-条补充标注。补充样本只用于冻结阈值审计，不参与重新调参。
-
-## 8. 一次运行一个实验
-
-命令只接收一份完整配置：
+每次只运行一份完整配置：
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-base.yaml
-```
-
-其他方法独立运行，例如：
-
-```bash
-CUDA_VISIBLE_DEVICES=3 bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/sst2/albertbasev1-v2-lexidt.yaml
 
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/sst2/albertbasev1-v2-semdt-openai.yaml
+  experiments/improvements/configs/sst2/albertbasev1-v2-ff-pbs.yaml
 ```
 
-### 8.1 运行 AE-PBS 与消融方法
-
-AE-PBS 使用独立的异步 frontier 搜索，不会改变 Base、Static、LexiDT 或 SemDT
-的默认搜索器。方法分析应在同一个 test manifest 上分别运行五份完整配置：
+组件消融可独立运行：
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-dynamic-beam.yaml
 
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/sst2/albertbasev1-v2-feasibility-first-pbs.yaml
+  experiments/improvements/configs/sst2/albertbasev1-v2-ff-pareto-greedy.yaml
 
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/sst2/albertbasev1-v2-strict-pbs.yaml
+  experiments/improvements/configs/sst2/albertbasev1-v2-hard-pbs.yaml
 
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/sst2/albertbasev1-v2-epsilon-greedy.yaml
-
-CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/sst2/albertbasev1-v2-ae-pbs.yaml
+  experiments/improvements/configs/sst2/albertbasev1-v2-ff-mnew.yaml
 ```
 
-五种配置分别隔离异步多路径、可行优先 Pareto、硬严格 Pareto、单路径自适应
-epsilon 和完整 AE-PBS。`infeasible_state_policy` 的语义是：
+本轮 schema 与历史结果不兼容。重跑前应先将旧的 `outputs/dt4lm-improvements/runs/` 整体移出
+或删除，避免 Base/Dynamic-Beam 的旧目录被断点逻辑识别。
 
-- `feasibility_first`：当前可行状态优先，frontier 有空位时仍按违反量保留不可行状态；
-- `discard`：root 可以无条件完成首次扩展，之后旧模型预测错误的候选永久丢弃。
+## 7. 产物协议
 
-AE-PBS 主配置中的搜索块为：
-
-```yaml
-attack:
-  differential_objective: dynamic
-  search:
-    method: async_frontier
-    ranking: epsilon_pareto
-    beam_size: 5
-    epsilon:
-      mode: adaptive
-      initial_quantile: 0.75
-      initialization_max_expansions: 2
-      decay: quadratic
-      infeasible_state_policy: feasibility_first
-    diagnostics:
-      trace_enabled: false
-```
-
-真正的 Strict-PBS 使用 `mode: strict` 和
-`infeasible_state_policy: discard`。Feasibility-First PBS 使用相同的
-`mode: strict`，但政策为 `feasibility_first`。
-
-这些参数应先在与正式 test manifest 不相交的 validation/pilot 样本上确定。参数
-冻结后再运行正式 test，不能根据 test 结果回选 `beam_size`、分位数、初始化窗口
-或衰减方式。仓库中的 20 份搜索配置可由下列脚本从各数据集 Base 配置重新生成：
-
-```bash
-python experiments/improvements/generate_ae_configs.py
-```
-
-生成器会覆盖同名 AE-PBS 配置；只有在有意同步 Base 路径或公共评估设置时才应
-执行，并在运行前检查差异。
-
-## 9. 检查实验产物
+完整 run 目录为：
 
 ```text
-outputs/dt4lm-improvements/runs/<dataset>/<models.id>/<experiment.id>/
+outputs/dt4lm-improvements/runs/<dataset>/<model_pair>/<experiment_id>/
   config.resolved.yaml
   provenance.json
   status.json
@@ -392,224 +148,159 @@ outputs/dt4lm-improvements/runs/<dataset>/<models.id>/<experiment.id>/
   attack_summary.json
   metrics/
     core.json
-    success_queries.json
+    query_data.json
     quality.json
-  successful_examples/
-  failed_examples/
-  skipped_examples/
 ```
 
-`results.jsonl` 每个 manifest 样本恰好一行，`result_status` 只能是
-`successful`、`failed` 或 `skipped`。`attack_summary.json` 和
-`metrics/core.json` 都显式记录三类数量及 `total`。
+`results.jsonl` 使用 schema v4，每个 manifest 样本恰好一行。`result_status` 只能是：
 
-只有原始输入已经满足“旧模型正确、新模型错误”时才会 skipped；其余三种
-初始预测状态均进入搜索。每条记录保留：
+- `successful`；
+- `failed`；
+- `skipped`。
 
-- `initial_state` 和 `skip_reason`；
-- 初始与最终的新旧模型输出；
-- `model_pair_queries`、初始/搜索查询分解；
-- 成功样本的 `queries_to_success`；
-- 修改率、耗时、显存与可选 NLI 诊断。
-- AE-PBS 的 epsilon、frontier 宽度、路径深度、去重/缓存计数和成功路径机制诊断。
+`query_data.json` 使用等长列式数据，完整保存：
 
-`core.json` 包含 PaperGSR、完整样本生成率、Success@100/500/1000、SQ-AUC、
-AMR、QPS、状态分布及 `resources`。`success_queries.json` 以等长的
-`data.dataset_index` 和 `data.queries_to_success` 两列保存曲线原始数据，避免
-`List[Dict]` 重复键名。本轮不绘制 success-query curve；以后可直接读取该文件。
+- `dataset_index`；
+- `result_status`；
+- `model_pair_queries`；
+- `queries_to_success`；
+- `budget_penalized_queries`。
 
-四项质量指标集中在 `quality.json.metrics`，每项独立保存 `status`、配置、值或
-错误。v2 的 `resources.json` 和四个单独质量文件不再生成。
+该文件可以直接支持 Success-Query 曲线、QPS 和 BPQC 重算，当前阶段不强制画图。
 
-QPS 口径为全部 manifest 样本产生的模型对查询总数除以成功生成数，失败和
-skipped 的查询也进入分子；成功数为 0 时为 `null`。
+## 8. 自动计算的指标
 
-AE-PBS/PBS 运行还会在 `core.json` 中记录 frontier、路径和 epsilon 的聚合诊断，
-以及预算惩罚查询成本：成功样本取 `queries_to_success`，失败样本按完整查询预算
-计，skipped 不进入。将 `attack.search.diagnostics.trace_enabled` 设置为 `true`
-时，run 目录额外生成 `search_trace.jsonl`；该文件用于小样本机制审计，正式主
-实验保持关闭以免 I/O 干扰耗时比较。
+`metrics/core.json` 包含：
 
-`escape_path_rate` 是兼容旧产物的 root-inclusive 指标。新实验应优先解释
-`post_root_escape_path_rate` 和 `post_root_old_prediction_error_path_rate`，它们
-排除原始输入本来就旧模型错误的情况。Strict-PBS 还记录
-`discarded_infeasible_state_rate`，用于核对硬过滤实际发生的比例。
+### 有效性与效率
 
-## 10. 断点恢复、指标重算与结果整理
+- `paper_gsr = successful / attackable`；
+- `sample_generation_rate = successful / total`；
+- `model_pair_qps = 全部样本模型对查询总数 / successful`；
+- `success_at_100` 至 `success_at_1000`；
+- `success_query_auc`；
+- `bpqc` 和 `normalized_bpqc`；
+- `amr`。
 
-### 10.1 重新执行同一实验
+### FF-PBS 机制
 
-再次执行同一份完整配置时，运行器会验证已有 `results.jsonl` 的样本数量、
-manifest 顺序与三类状态。验证通过后跳过攻击，仅补算缺失、旧 schema 或失败的
-指标；已有 v3 完成指标也会作为 checkpoint 复用。攻击相关配置改变时不会错误
-复用旧结果，而会要求使用新的 `experiment.id`。
+- `non_top1_path_rate`；
+- `post_root_old_prediction_error_path_rate`；
+- `recover_first_infeasible_depth_mean/median`；
+- `recover_first_recovery_depth_mean/median`；
+- `recover_depth_span_mean/median`；
+- `infeasible_fill_event_rate`；
+- `infeasible_retained_state_rate`；
+- `hard_discard_rate`；
+- `frontier_size_mean`、`rank1_size_mean`；
+- `frontier_modified_set_diversity_mean`；
+- `frontier_depth_diversity_mean`；
+- `success_path_depth_mean/median`。
+
+每个成功样本还会在 `results.jsonl` 的 `search_diagnostics.successful_path` 中保存紧凑列式
+根到终点路径，供恢复深度分析和论文路径案例使用。
+
+修改位置和深度多样性均是对每次 frontier 的 `unique_count / frontier_size` 先归一化，再在
+所有 frontier 更新上取平均。
+
+### 资源
+
+`core.json.resources` 包含：
+
+- `end_to_end_seconds`；
+- `peak_vram_bytes`；
+- `frontier_sort_seconds`；
+- `frontier_sort_time_ratio`。
+
+## 9. 重算指标
+
+攻击已完成但 metrics 失败时，不需重跑攻击：
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/sst2/albertbasev1-v2-base.yaml
+python statistics/recompute_metrics.py \
+  --i outputs/dt4lm-improvements/runs \
+  --stage all
 ```
 
-### 10.2 批量重算已拉取实验
-
-`status.json` 分别记录 attack、core 和 quality 状态。BERTScore 或 NLTK 指标
-失败不会删除攻击结果。升级 PyTorch 或准备 safetensors 模型后，可以删除旧
-metrics 并批量重算；脚本会直接使用每个 run 内冻结的配置和 manifest：
+`core` 和 `quality` 可以分开重算：
 
 ```bash
-RUN_ROOT=output/dt4lm-improvements/run
-find "$RUN_ROOT" -type d -name metrics -prune -exec rm -rf {} +
-CUDA_VISIBLE_DEVICES=1 python statistics/recompute_metrics.py --i "$RUN_ROOT"
+python statistics/recompute_metrics.py --stage core
+python statistics/recompute_metrics.py --stage quality
 ```
 
-不删除 metrics 也可以执行同一命令：完整 v3 质量子指标会复用，失败项会重试。
-脚本逐一处理全部 run，最后集中报告失败项。只重算某一阶段可加
-`--stage core` 或 `--stage quality`。
-
-单个 run 也可以独立重跑质量评估：
-
-```bash
-python statistics/evaluate_improvements.py \
-  --stage quality \
-  --config <run-dir>/config.resolved.yaml \
-  --results <run-dir>/results.jsonl \
-  --manifest <run-dir>/sample_manifest.json \
-  --output-dir <run-dir>/metrics \
-  --status-file <run-dir>/status.json
-```
-
-### 10.3 汇总论文表格
-
-指标全部完成后执行：
-
-```bash
-python statistics/aggregate_improvements.py
-```
-
-默认读取 `output/dt4lm-improvements/run`，并生成其中的 `summary.csv`。自定义
-输入目录和文件名：
+## 10. 生成总表
 
 ```bash
 python statistics/aggregate_improvements.py \
   --i outputs/dt4lm-improvements/runs \
-  --o first-round.csv
+  --o summary.csv
 ```
 
-CSV 每个 run 一行，包含 dataset、model pair、method、seed，N/A/S/F/K、论文
-核心指标、四项质量指标、资源与 NLI 诊断、模型/config/manifest 身份、运行状态
-及关键依赖版本。整理器不计算相对 Base 指标；人工评估与标定报告仍使用各自的
-专用分析脚本。
+输出文件位于：
 
-早期 `strict-pbs` 配置没有 `infeasible_state_policy`，实际语义是
-Feasibility-First。整理器会把这类历史 run 的 `method` 自动规范为
-`feasibility-first-pbs`，同时在 `configured_method` 保留原始名称。新的硬严格
-配置使用独立实验 ID `*-strict-pbs-hard`，不会复用历史结果目录。
+```text
+outputs/dt4lm-improvements/runs/summary.csv
+```
 
-### 10.4 AE-PBS 成对统计
+汇总器只接受 schema-v4 结果，不会尝试重命名或兼容历史方法。
 
-Base 与 AE-PBS 必须使用相同 dataset、model pair、query budget 和 manifest。
-攻击与指标完成后，按 dataset index 做严格配对分析：
+## 11. 配对比较
+
+Base 与 FF-PBS：
 
 ```bash
 python statistics/compare_search_methods.py \
   --baseline outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/sst2-albertbasev1-v2-base \
-  --candidate outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/sst2-albertbasev1-v2-ae-pbs \
-  --o outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/ae-pbs-vs-base.json \
-  --bootstrap-samples 10000 \
-  --seed 765
+  --candidate outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/sst2-albertbasev1-v2-ff-pbs \
+  --o outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/ffpbs-vs-base.json
 ```
 
-输出包含三态列联表、Base/AE-PBS 独有成功、共同成功与共同失败、McNemar 精确
-检验、配对 bootstrap、共同成功样本的查询数/修改率比较，以及全部 attackable
-样本的预算惩罚查询比较。AE-PBS 独有成功还会报告非 dynamic top-1 路径和临时
-负 old margin 路径占比。
-
-## 11. 轨迹审计
-
-正式 SemDT run 完成后，可用相同完整配置审计其实际搜索轨迹：
+Hard-PBS 与 FF-PBS：
 
 ```bash
-bash experiments/improvements/calibrate_semdt.sh \
-  experiments/improvements/configs/sst2/albertbasev1-v2-semdt-openai.yaml \
-  outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/sst2-albertbasev1-v2-semdt-openai
+python statistics/compare_search_methods.py \
+  --baseline outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/sst2-albertbasev1-v2-hard-pbs \
+  --candidate outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/sst2-albertbasev1-v2-ff-pbs \
+  --o outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/ffpbs-vs-hard.json
 ```
 
-该步骤只评估冻结阈值，不重新调参。
+输出包含 McNemar、配对 bootstrap、Wilcoxon、BPQC 差、百分点 GSR 差以及 FF-PBS 独有成功的：
 
-## 12. 人工评估
+- `non_top1_rate`；
+- `unique_post_root_old_prediction_error_path_rate`。
 
-以 Base 与 SemDT 主结果为输入，按公共成功、Base 独有成功和 SemDT 独有成功
-三层抽取 100 个原始样本：
+## 12. 人工评价
+
+在一个单句任务和一个句子对任务上分别执行。生成盲评样本：
 
 ```bash
 python statistics/sample_human_evaluation.py \
   --base-results <base-run>/results.jsonl \
-  --semdt-results <semdt-run>/results.jsonl \
+  --ffpbs-results <ffpbs-run>/results.jsonl \
   --manifest <base-run>/sample_manifest.json \
-  --output outputs/dt4lm-improvements/human/sst2/reviews.jsonl \
-  --key-output outputs/dt4lm-improvements/human/sst2/method_key.json \
-  --sample-size 100 \
-  --seed 765
+  --output human/reviews.jsonl \
+  --key-output human/key.json \
+  --method-sample-size 100 \
+  --unique-sample-size 50
 ```
 
-只向评审者分发 `reviews.jsonl`。完成双人标注与冲突复核后：
+每个 review 由两名评审者分别填写：
+
+- `reviewer_1_label_preserved` 和 `reviewer_2_label_preserved`；
+- `reviewer_1_semantic_preserved` 和 `reviewer_2_semantic_preserved`。
+
+两名评审独立标注，不一致时在 `final_label_preserved` 或
+`final_semantic_preserved` 填写裁决值；一致时可保持 `null`。完成后分析：
 
 ```bash
 python statistics/analyze_human_evaluation.py \
-  --reviews outputs/dt4lm-improvements/human/sst2/reviews.jsonl \
-  --key outputs/dt4lm-improvements/human/sst2/method_key.json \
+  --reviews human/reviews.jsonl \
+  --key human/key.json \
   --base-core <base-run>/metrics/core.json \
-  --semdt-core <semdt-run>/metrics/core.json \
-  --output outputs/dt4lm-improvements/human/sst2/analysis.json \
-  --bootstrap-samples 10000 \
-  --seed 765
+  --ffpbs-core <ffpbs-run>/metrics/core.json \
+  --output human/analysis.json
 ```
 
-结果按各层实际占比估计语义保持率、ValidGSR 和 ValidPaperGSR，并报告分层
-bootstrap 95% 置信区间、评审一致率和 Cohen's kappa。
-
-## 13. MRPC/MR 首次运行
-
-MRPC：
-
-```bash
-python datasets/preprocess_dataset.py mrpc
-bash experiments/finetune/train_albertbasev1.sh mrpc 1
-bash experiments/finetune/train_albertbasev2.sh mrpc 1
-bash experiments/improvements/prepare_manifests.sh \
-  experiments/improvements/configs/mrpc/albertbasev1-v2-base.yaml
-CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/mrpc/albertbasev1-v2-base.yaml
-```
-
-MR：
-
-```bash
-python datasets/preprocess_dataset.py mr
-bash experiments/finetune/train_albertbasev1.sh mr 1
-bash experiments/finetune/train_albertbasev2.sh mr 1
-bash experiments/improvements/prepare_manifests.sh \
-  experiments/improvements/configs/mr/albertbasev1-v2-base.yaml
-CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/mr/albertbasev1-v2-base.yaml
-```
-
-已有正确数据与 checkpoint 时，可跳过对应步骤。SemDT/OpenAI/HF 配置按第
-6-8 节先生成 train manifest 并完成阈值标定。
-
-## 14. 完成检查
-
-- 48 份配置均能独立通过 schema 校验；
-- SST-2/RTE/MRPC/MR 各方法分别共享同一 test manifest；
-- manifest 不含模型预测或共同正确样本筛选；
-- 每个 run 满足 `total = successful + failed + skipped`；
-- `results.jsonl` 的索引和顺序与 manifest 完全一致；
-- `queries_to_success` 只出现在成功记录中且不超过查询预算；
-- BERTScore 使用真实本地路径，禁止下载时不会访问远端；
-- `.bin` BERTScore checkpoint 使用 `torch>=2.6`，或直接使用 safetensors；
-- 质量指标失败后攻击与核心产物仍可用；
-- v3 metrics 仅有 `core.json`、`success_queries.json` 和 `quality.json`；
-- `statistics/aggregate_improvements.py` 能生成每个 run 一行的汇总 CSV；
-- AE-PBS 的 resolved config、JSONL、core 和 summary 搜索身份完全一致；
-- Base 与 AE-PBS 成对分析使用相同 manifest hash 和 query budget；
-- 单 run 产物中没有 Base 路径、相对差值或扩展决策；
-- Git 状态中不存在 secret 配置或 API key。
+结果包含 Base/FF-PBS 的 LPR、SPR、HVR、ValidGSR，FF-PBS 独有成功的 IVR，以及两个
+判断维度各自的 Cohen's kappa 和 bootstrap 95% 置信区间。

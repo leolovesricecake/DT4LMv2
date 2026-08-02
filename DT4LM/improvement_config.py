@@ -11,9 +11,10 @@ OBJECTIVES = frozenset(("dynamic", "static", "lexi"))
 SEMANTIC_CONSTRAINTS = frozenset(("original", "nli"))
 THRESHOLD_SOURCES = frozenset(("none", "manual", "calibrated"))
 SEARCH_METHODS = frozenset(("legacy_greedy", "async_frontier"))
-FRONTIER_RANKINGS = frozenset(("dynamic", "epsilon_pareto"))
-EPSILON_MODES = frozenset(("disabled", "strict", "adaptive"))
-INFEASIBLE_STATE_POLICIES = frozenset(("feasibility_first", "discard"))
+FRONTIER_RANKINGS = frozenset(
+    ("dynamic", "feasibility_pareto", "feasibility_mnew")
+)
+INFEASIBLE_STATE_POLICIES = frozenset(("fill", "discard"))
 
 
 def _require(mapping: Mapping[str, Any], key: str, context: str) -> Any:
@@ -144,9 +145,11 @@ def validate_experiment_config(config: Mapping[str, Any]) -> None:
                 "method",
                 "ranking",
                 "beam_size",
-                "epsilon",
                 "diagnostics",
             }
+            ranking = _require(search, "ranking", "attack.search")
+            if ranking != "dynamic":
+                allowed_search_fields.add("infeasible_state_policy")
             if set(search) != allowed_search_fields:
                 raise ValueError(
                     "async_frontier attack.search fields must be exactly "
@@ -158,87 +161,21 @@ def validate_experiment_config(config: Mapping[str, Any]) -> None:
                 raise ValueError(
                     "async_frontier requires attack.differential_objective: dynamic."
                 )
-            for key in ("ranking", "beam_size", "epsilon", "diagnostics"):
+            for key in ("beam_size", "diagnostics"):
                 _require(search, key, "attack.search")
-            if search["ranking"] not in FRONTIER_RANKINGS:
+            if ranking not in FRONTIER_RANKINGS:
                 raise ValueError(
                     "attack.search.ranking must be one of "
                     f"{sorted(FRONTIER_RANKINGS)!r}."
                 )
             if not isinstance(search["beam_size"], int) or search["beam_size"] <= 0:
                 raise ValueError("attack.search.beam_size must be a positive integer.")
-            epsilon = search["epsilon"]
-            if not isinstance(epsilon, dict):
-                raise ValueError("attack.search.epsilon must be a mapping.")
-            epsilon_mode = _require(epsilon, "mode", "attack.search.epsilon")
-            if epsilon_mode not in EPSILON_MODES:
-                raise ValueError(
-                    "attack.search.epsilon.mode must be one of "
-                    f"{sorted(EPSILON_MODES)!r}."
-                )
-            base_epsilon_fields = (
-                {
-                    "mode",
-                    "initial_quantile",
-                    "initialization_max_expansions",
-                    "decay",
-                }
-                if epsilon_mode == "adaptive"
-                else {"mode"}
-            )
-            allowed_epsilon_fields = {frozenset(base_epsilon_fields)}
-            if epsilon_mode in {"strict", "adaptive"}:
-                allowed_epsilon_fields.add(
-                    frozenset(base_epsilon_fields | {"infeasible_state_policy"})
-                )
-            if frozenset(epsilon) not in allowed_epsilon_fields:
-                raise ValueError(
-                    f"Invalid fields for {epsilon_mode} epsilon configuration."
-                )
-            if search["ranking"] == "dynamic" and epsilon_mode != "disabled":
-                raise ValueError("Dynamic frontier ranking requires disabled epsilon.")
-            if search["ranking"] == "epsilon_pareto" and epsilon_mode == "disabled":
-                raise ValueError(
-                    "Epsilon-Pareto frontier ranking requires strict or "
-                    "adaptive epsilon."
-                )
-            infeasible_policy = epsilon.get(
-                "infeasible_state_policy", "feasibility_first"
-            )
-            if infeasible_policy not in INFEASIBLE_STATE_POLICIES:
-                raise ValueError(
-                    "attack.search.epsilon.infeasible_state_policy must be one of "
-                    f"{sorted(INFEASIBLE_STATE_POLICIES)!r}."
-                )
-            if epsilon_mode == "adaptive":
-                if infeasible_policy != "feasibility_first":
+            if ranking != "dynamic":
+                policy = search["infeasible_state_policy"]
+                if policy not in INFEASIBLE_STATE_POLICIES:
                     raise ValueError(
-                        "Adaptive epsilon requires infeasible_state_policy: "
-                        "feasibility_first."
-                    )
-                for key in (
-                    "initial_quantile",
-                    "initialization_max_expansions",
-                    "decay",
-                ):
-                    _require(epsilon, key, "attack.search.epsilon")
-                if not isinstance(epsilon["initial_quantile"], (int, float)) or not (
-                    0.0 <= float(epsilon["initial_quantile"]) <= 1.0
-                ):
-                    raise ValueError(
-                        "attack.search.epsilon.initial_quantile must lie in [0, 1]."
-                    )
-                if (
-                    not isinstance(epsilon["initialization_max_expansions"], int)
-                    or epsilon["initialization_max_expansions"] <= 0
-                ):
-                    raise ValueError(
-                        "attack.search.epsilon.initialization_max_expansions must "
-                        "be a positive integer."
-                    )
-                if epsilon["decay"] not in {"linear", "quadratic"}:
-                    raise ValueError(
-                        "attack.search.epsilon.decay must be linear or quadratic."
+                        "attack.search.infeasible_state_policy must be one of "
+                        f"{sorted(INFEASIBLE_STATE_POLICIES)!r}."
                     )
             diagnostics = search["diagnostics"]
             if not isinstance(diagnostics, dict) or set(diagnostics) != {
@@ -344,6 +281,14 @@ def validate_experiment_config(config: Mapping[str, Any]) -> None:
         not isinstance(value, int) or value <= 0 for value in budgets
     ):
         raise ValueError("evaluation.core.success_budgets must contain positive integers.")
+    if budgets != sorted(set(budgets)):
+        raise ValueError(
+            "evaluation.core.success_budgets must be unique and increasing."
+        )
+    if budgets[-1] > attack["query_budget"]:
+        raise ValueError(
+            "evaluation.core.success_budgets cannot exceed attack.query_budget."
+        )
     for metric in ("bleu", "meteor", "rouge_l", "bertscore"):
         metric_config = quality.get(metric)
         if not isinstance(metric_config, dict) or not isinstance(

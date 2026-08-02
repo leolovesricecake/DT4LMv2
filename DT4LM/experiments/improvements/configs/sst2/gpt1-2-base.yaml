@@ -1,4 +1,3 @@
-# Complete SST-2 Base run; paths resolve from DT4LM/.
 schema_version: 2
 experiment:
   id: sst2-gpt1-2-base
@@ -9,7 +8,8 @@ dataset:
   id: sst2
   path: outputs/datasets/sst2
   revision: null
-  text_columns: [sentence]
+  text_columns:
+  - sentence
   label_column: label
   task_definition: Classify the sentence sentiment as negative or positive.
   evaluation:
@@ -31,16 +31,30 @@ attack:
   semantic_constraint: original
   query_budget: 1000
 semantic:
-  threshold: {source: none}
+  threshold:
+    source: none
 calibration:
   enabled: false
 evaluation:
   core:
-    success_budgets: [100, 500, 1000]
+    success_budgets:
+    - 100
+    - 200
+    - 300
+    - 400
+    - 500
+    - 600
+    - 700
+    - 800
+    - 900
+    - 1000
   quality:
-    bleu: {enabled: true}
-    meteor: {enabled: true}
-    rouge_l: {enabled: true}
+    bleu:
+      enabled: true
+    meteor:
+      enabled: true
+    rouge_l:
+      enabled: true
     bertscore:
       enabled: true
       model_name_or_path: /mnt/huawei/nsq/models/microsoft/deberta-large-mnli

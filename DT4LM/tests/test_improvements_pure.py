@@ -554,37 +554,43 @@ def test_manifest_preparation_uses_configured_hyperparameter():
 def test_experiment_configs_define_independent_runtime_axes():
     config_root = ROOT / "experiments/improvements/configs"
     expected = {
-        "base": ("dynamic", "original", "none"),
-        "static": ("static", "original", "none"),
-        "lexidt": ("lexi", "original", "none"),
-        "semdt-manual": ("dynamic", "nli", "manual"),
-        "semdt-openai": ("dynamic", "nli", "calibrated"),
-        "semdt-hf": ("dynamic", "nli", "calibrated"),
-        "combined-openai": ("lexi", "nli", "calibrated"),
+        "base": None,
+        "dynamic-beam": ("dynamic", 5, None),
+        "ff-pareto-greedy": ("feasibility_pareto", 1, "fill"),
+        "hard-pbs": ("feasibility_pareto", 5, "discard"),
+        "ff-mnew": ("feasibility_mnew", 5, "fill"),
+        "ff-pbs": ("feasibility_pareto", 5, "fill"),
     }
     for dataset_id in ("sst2", "rte", "mrpc", "mr"):
-        for name, axes in expected.items():
-            config = experiment_runner.load_experiment_config(
-                config_root / dataset_id / f"albertbasev1-v2-{name}.yaml"
-            )
-            assert (
-                config["attack"]["differential_objective"],
-                config["attack"]["semantic_constraint"],
-                config["semantic"]["threshold"]["source"],
-            ) == axes
+        for model_pair in ("albertbasev1-v2", "gpt1-2"):
+            for name, axes in expected.items():
+                config = experiment_runner.load_experiment_config(
+                    config_root / dataset_id / f"{model_pair}-{name}.yaml"
+                )
+                assert config["attack"]["differential_objective"] == "dynamic"
+                assert config["attack"]["semantic_constraint"] == "original"
+                assert config["semantic"]["threshold"]["source"] == "none"
+                search = config["attack"].get("search")
+                if axes is None:
+                    assert search is None
+                else:
+                    assert (
+                        search["ranking"],
+                        search["beam_size"],
+                        search.get("infeasible_state_policy"),
+                    ) == axes
 
 
-def test_dataset_configs_expose_sampling_and_threshold_search():
+def test_dataset_configs_expose_sampling_and_task_schemas():
     config_dir = ROOT / "experiments/improvements/configs"
     configs = {
         dataset_id: experiment_runner.load_experiment_config(
-            config_dir / dataset_id / "albertbasev1-v2-semdt-openai.yaml"
+            config_dir / dataset_id / "albertbasev1-v2-base.yaml"
         )
         for dataset_id in ("sst2", "rte", "mrpc", "mr")
     }
     sst2 = configs["sst2"]
     rte = configs["rte"]
-    assert sst2["calibration"]["source_sampling"]["sample_size"] == 500
     assert sst2["dataset"]["evaluation"]["sample_size"] == 1000
     assert rte["dataset"]["evaluation"]["sample_size"] == 1000
     assert sst2["dataset"]["path"] == "outputs/datasets/sst2"
@@ -599,16 +605,13 @@ def test_dataset_configs_expose_sampling_and_threshold_search():
     assert "paraphrases" in configs["mrpc"]["dataset"]["task_definition"]
     assert "sentiment" in configs["mr"]["dataset"]["task_definition"]
     for config in configs.values():
-        semdt_calibrator._validate_config(config)
         assert config["models"]["id"] == "albertbasev1-v2"
         namespace = Path(config["dataset"]["evaluation"]["manifest"]).parent.name
         assert namespace == config["dataset"]["id"]
-        assert config["calibration"]["threshold_search"] == {
-            "method": "grid",
-            "step": 0.01,
-            "min_precision": 0.95,
-            "bootstrap_samples": 10000,
-        }
+        assert config["calibration"] == {"enabled": False}
+        assert config["evaluation"]["core"]["success_budgets"] == list(
+            range(100, 1001, 100)
+        )
 
 
 def test_dataset_schema_preflight_supports_mrpc_and_mr():
@@ -1293,47 +1296,41 @@ def test_hf_judge_repairs_only_invalid_json_format():
     assert repairs == ["shared prompt"]
 
 
-def test_human_sampling_minimums_and_weighted_estimators():
-    groups = {
-        "common_success": list(range(90)),
-        "base_only_success": list(range(90, 99)),
-        "semdt_only_success": [99],
+def test_human_sampling_and_joint_validity_rates():
+    def row(index, status):
+        return {
+            "schema_version": 4,
+            "dataset_index": index,
+            "result_status": status,
+            "original_input": {"sentence": f"original-{index}"},
+            "candidate_input": {"sentence": f"candidate-{index}"},
+            "ground_truth_output": 0,
+        }
+
+    base = {0: row(0, "successful"), 1: row(1, "successful"), 2: row(2, "failed")}
+    ff = {0: row(0, "failed"), 1: row(1, "successful"), 2: row(2, "successful")}
+    reviews, key = human_sample.build_sample(
+        base, ff, method_sample_size=2, unique_sample_size=1, seed=7
+    )
+    assert len(reviews) == 4
+    assert key["population_counts"] == {
+        "base_overall": 2,
+        "ffpbs_overall": 2,
+        "ffpbs_unique": 1,
     }
-    allocation = human_sample._allocate(groups, 20)
-    assert sum(allocation.values()) == 20
-    assert allocation["common_success"] >= 5
-    assert allocation["base_only_success"] >= 5
-    assert allocation["semdt_only_success"] == 1
+    unique = [item for item in key["rows"] if "ffpbs_unique" in item["cohorts"]]
+    assert len(unique) == 1
+    assert unique[0]["method"] == "FF-PBS"
 
     observations = [
-        {
-            "stratum": "common_success",
-            "labels": {"Base": True, "SemDT": True},
-        },
-        {
-            "stratum": "common_success",
-            "labels": {"Base": False, "SemDT": True},
-        },
-        {"stratum": "base_only_success", "labels": {"Base": True}},
-        {"stratum": "semdt_only_success", "labels": {"SemDT": False}},
+        {"label_preserved": True, "semantic_preserved": True},
+        {"label_preserved": True, "semantic_preserved": False},
+        {"label_preserved": False, "semantic_preserved": True},
     ]
-    estimates = human_analysis._method_estimates(
-        observations,
-        {
-            "common_success": 20,
-            "base_only_success": 10,
-            "semdt_only_success": 10,
-        },
-        sample_count=100,
-    )
-    assert estimates["Base"]["semantic_preservation_rate"] == pytest.approx(
-        2 / 3
-    )
-    assert estimates["Base"]["valid_gsr"] == pytest.approx(0.2)
-    assert estimates["SemDT"]["semantic_preservation_rate"] == pytest.approx(
-        2 / 3
-    )
-    assert estimates["SemDT"]["valid_gsr"] == pytest.approx(0.2)
+    rates = human_analysis._rates(observations)
+    assert rates["lpr"] == pytest.approx(2 / 3)
+    assert rates["spr"] == pytest.approx(2 / 3)
+    assert rates["hvr"] == pytest.approx(1 / 3)
 
 
 def test_core_metrics_preserve_curve_data_without_cross_run_comparison():
@@ -1343,6 +1340,7 @@ def test_core_metrics_preserve_curve_data_without_cross_run_comparison():
     }
     records = [
         {
+            "schema_version": 4,
             "dataset_index": 3,
             "result_status": "successful",
             "initial_state": "both_correct",
@@ -1351,6 +1349,7 @@ def test_core_metrics_preserve_curve_data_without_cross_run_comparison():
             "modification_rate": 0.2,
         },
         {
+            "schema_version": 4,
             "dataset_index": 5,
             "result_status": "failed",
             "initial_state": "both_wrong",
@@ -1359,6 +1358,7 @@ def test_core_metrics_preserve_curve_data_without_cross_run_comparison():
             "modification_rate": 0.0,
         },
         {
+            "schema_version": 4,
             "dataset_index": 8,
             "result_status": "skipped",
             "initial_state": "already_differential",
@@ -1367,7 +1367,7 @@ def test_core_metrics_preserve_curve_data_without_cross_run_comparison():
             "modification_rate": 0.0,
         },
     ]
-    result, success_queries = evaluation.core_metrics(
+    result, query_data = evaluation.core_metrics(
         records,
         manifest,
         success_budgets=[100, 500, 1000],
@@ -1379,9 +1379,12 @@ def test_core_metrics_preserve_curve_data_without_cross_run_comparison():
     assert result["model_pair_qps"] == 1011
     assert "success_query_data" not in result
     assert "successful_query_counts" not in result
-    assert success_queries["data"] == {
-        "dataset_index": [3],
-        "queries_to_success": [10],
+    assert query_data["data"] == {
+        "dataset_index": [3, 5, 8],
+        "result_status": ["successful", "failed", "skipped"],
+        "model_pair_queries": [10, 1000, 1],
+        "queries_to_success": [10, None, None],
+        "budget_penalized_queries": [10, 1000, None],
     }
     assert "comparison_to_base" not in result
 
@@ -1474,7 +1477,7 @@ def test_quality_retry_reuses_completed_metrics_and_retries_failure(tmp_path):
         for index, name in enumerate(("bleu", "meteor", "rouge_l"), start=1)
     }
     prior = {
-        "schema_version": 3,
+        "schema_version": 4,
         "status": "failed",
         "successful_sample_count": 1,
         "metrics": {
@@ -1494,13 +1497,14 @@ def test_quality_retry_reuses_completed_metrics_and_retries_failure(tmp_path):
     assert retried["metrics"]["bertscore"]["status"] == "failed"
 
 
-def test_runner_recognizes_complete_schema_v3_metric_checkpoints(tmp_path):
+def test_runner_recognizes_complete_schema_v4_metric_checkpoints(tmp_path):
     metrics = tmp_path / "metrics"
     metrics.mkdir()
     (metrics / "core.json").write_text(
         json.dumps(
             {
-                "schema_version": 3,
+                "schema_version": 4,
+                "total": 2,
                 "successful": 1,
                 "resources": {},
                 "query_budget": 1000,
@@ -1509,12 +1513,19 @@ def test_runner_recognizes_complete_schema_v3_metric_checkpoints(tmp_path):
         ),
         encoding="utf-8",
     )
-    (metrics / "success_queries.json").write_text(
+    (metrics / "query_data.json").write_text(
         json.dumps(
             {
-                "schema_version": 3,
+                "schema_version": 4,
+                "sample_count": 2,
                 "successful_sample_count": 1,
-                "data": {"dataset_index": [4], "queries_to_success": [9]},
+                "data": {
+                    "dataset_index": [4, 5],
+                    "result_status": ["successful", "failed"],
+                    "model_pair_queries": [9, 1000],
+                    "queries_to_success": [9, None],
+                    "budget_penalized_queries": [9, 1000],
+                },
             }
         ),
         encoding="utf-8",
@@ -1528,7 +1539,7 @@ def test_runner_recognizes_complete_schema_v3_metric_checkpoints(tmp_path):
     (metrics / "quality.json").write_text(
         json.dumps(
             {
-                "schema_version": 3,
+                "schema_version": 4,
                 "status": "completed",
                 "successful_sample_count": 1,
                 "metrics": {
@@ -1574,7 +1585,7 @@ def test_aggregate_improvements_writes_paper_metrics(tmp_path):
         __import__("yaml").safe_dump(config), encoding="utf-8"
     )
     core = {
-        "schema_version": 3,
+        "schema_version": 4,
         "total": 2,
         "attackable": 2,
         "successful": 1,
@@ -1595,7 +1606,7 @@ def test_aggregate_improvements_writes_paper_metrics(tmp_path):
         "resources": {"end_to_end_seconds": 3.5, "peak_vram_bytes": 10},
     }
     quality = {
-        "schema_version": 3,
+        "schema_version": 4,
         "status": "completed",
         "successful_sample_count": 1,
         "metrics": {
@@ -1609,10 +1620,19 @@ def test_aggregate_improvements_writes_paper_metrics(tmp_path):
             "bertscore": {"status": "disabled", "config": {"enabled": False}},
         },
     }
-    success_queries = {
-        "schema_version": 3,
+    query_data = {
+        "schema_version": 4,
+        "sample_count": 2,
+        "attackable_sample_count": 2,
         "successful_sample_count": 1,
-        "data": {"dataset_index": [7], "queries_to_success": [12]},
+        "query_budget": 1000,
+        "data": {
+            "dataset_index": [7, 8],
+            "result_status": ["successful", "failed"],
+            "model_pair_queries": [12, 1000],
+            "queries_to_success": [12, None],
+            "budget_penalized_queries": [12, 1000],
+        },
     }
     manifest = {
         "effective_sample_size": 2,
@@ -1634,7 +1654,7 @@ def test_aggregate_improvements_writes_paper_metrics(tmp_path):
     for path, payload in (
         (metrics / "core.json", core),
         (metrics / "quality.json", quality),
-        (metrics / "success_queries.json", success_queries),
+        (metrics / "query_data.json", query_data),
         (run_dir / "sample_manifest.json", manifest),
         (run_dir / "status.json", status),
         (run_dir / "provenance.json", provenance),
@@ -1653,7 +1673,7 @@ def test_aggregate_improvements_writes_paper_metrics(tmp_path):
     )
     assert row["paper_gsr"] == "0.5"
     assert row["bleu"] == "0.8"
-    assert row["success_queries_file"].endswith("metrics/success_queries.json")
+    assert row["metrics_schema_version"] == "4"
 
 
 def test_metric_recomputation_discovers_nested_runs(tmp_path):

@@ -1,4 +1,4 @@
-"""Lightweight asynchronous-search tests without torch or pytest imports."""
+"""Lightweight FF-PBS state-machine tests without torch imports."""
 
 from collections import OrderedDict
 import importlib.util
@@ -64,7 +64,7 @@ search_module = _load(
 
 
 class FakeAttackedText:
-    """Path-aware text object exposing the subset used by AE-PBS."""
+    """Path-aware text object exposing the subset used by FF-PBS."""
 
     def __init__(self, text, modified_indices=()):
         self.text_input = OrderedDict((("text", text),))
@@ -75,6 +75,7 @@ class FakeAttackedText:
         }
 
     def modification_rate(self, original_text):
+        del original_text
         return len(self.attack_attrs["modified_indices"]) / 2
 
 
@@ -142,19 +143,15 @@ class SearchHarness:
         transformations,
         margins,
         beam_size=2,
-        epsilon_mode="adaptive",
-        infeasible_state_policy="feasibility_first",
+        ranking="feasibility_pareto",
+        infeasible_state_policy="fill",
     ):
         self.goal = FakeGoalFunction()
         self.transformations = transformations
         self.margins = margins
         self.search = search_module.AsyncDifferentialBeamSearch(
-            ranking="epsilon_pareto",
+            ranking=ranking,
             beam_size=beam_size,
-            epsilon_mode=epsilon_mode,
-            epsilon_initial_quantile=0.75,
-            epsilon_initialization_max_expansions=2,
-            epsilon_decay="quadratic",
             infeasible_state_policy=infeasible_state_policy,
         )
         self.search.goal_function = self.goal
@@ -163,8 +160,7 @@ class SearchHarness:
 
     def get_transformations(self, attacked_text, original_text=None):
         del original_text
-        text = attacked_text.text_input["text"]
-        return list(self.transformations.get(text, ()))
+        return list(self.transformations.get(attacked_text.text_input["text"], ()))
 
     def get_goal_results(self, candidates):
         remaining = self.goal.query_budget - self.goal.num_queries
@@ -225,47 +221,7 @@ class AsyncSearchTests(unittest.TestCase):
         self.assertEqual(diagnostics["candidate_state_count"], 2)
         self.assertEqual(diagnostics["duplicate_state_count"], 0)
 
-    def test_second_expansion_can_initialize_adaptive_epsilon(self):
-        root = FakeAttackedText("root")
-        level_one = FakeAttackedText("level-one", modified_indices=(0,))
-        level_two = FakeAttackedText("level-two", modified_indices=(0, 1))
-        harness = SearchHarness(
-            {"root": (level_one,), "level-one": (level_two,)},
-            {
-                "level-one": (0.3, -0.2, False),
-                "level-two": (-0.4, 0.1, False),
-            },
-            beam_size=1,
-        )
-
-        final = harness.search.perform_search(
-            _result(root, old_margin=0.5, new_margin=-0.5)
-        )
-
-        diagnostics = final.search_diagnostics
-        self.assertEqual(diagnostics["epsilon_initialization_expansion"], 2)
-        self.assertAlmostEqual(diagnostics["epsilon_0"], 0.4)
-        self.assertFalse(diagnostics["epsilon_zero_initialization"])
-
-    def test_early_success_freezes_unneeded_epsilon_as_zero(self):
-        root = FakeAttackedText("root")
-        success = FakeAttackedText("success", modified_indices=(0,))
-        harness = SearchHarness(
-            {"root": (success,)},
-            {"success": (0.3, 0.4, True)},
-            beam_size=1,
-        )
-
-        final = harness.search.perform_search(
-            _result(root, old_margin=0.5, new_margin=-0.5)
-        )
-
-        diagnostics = final.search_diagnostics
-        self.assertEqual(diagnostics["epsilon_0"], 0.0)
-        self.assertTrue(diagnostics["epsilon_zero_initialization"])
-        self.assertEqual(diagnostics["epsilon_initialization_expansion"], 1)
-
-    def test_success_can_recover_after_negative_old_margin(self):
+    def test_ffpbs_recovers_after_old_model_error(self):
         root = FakeAttackedText("root")
         escape = FakeAttackedText("escape", modified_indices=(0,))
         success = FakeAttackedText("success", modified_indices=(0, 1))
@@ -283,13 +239,32 @@ class AsyncSearchTests(unittest.TestCase):
         )
 
         self.assertEqual(final.goal_status, GoalFunctionResultStatus.SUCCEEDED)
-        self.assertTrue(final.search_diagnostics["path_has_negative_old_margin"])
         self.assertTrue(
-            final.search_diagnostics["path_has_post_root_negative_old_margin"]
+            final.search_diagnostics[
+                "path_has_post_root_old_prediction_error"
+            ]
         )
-        self.assertEqual(final.search_diagnostics["root_dynamic_rank"], 1)
+        self.assertEqual(
+            final.search_diagnostics[
+                "first_post_root_old_prediction_error_depth"
+            ],
+            1,
+        )
+        self.assertEqual(
+            final.search_diagnostics[
+                "first_recovery_depth_after_old_prediction_error"
+            ],
+            2,
+        )
+        self.assertEqual(
+            final.search_diagnostics["successful_path"]["depth"], [0, 1, 2]
+        )
+        self.assertEqual(
+            final.search_diagnostics["successful_path"]["old_is_correct"],
+            [True, False, True],
+        )
 
-    def test_hard_strict_discards_an_infeasible_escape_state(self):
+    def test_hard_pbs_discards_infeasible_recovery_state(self):
         root = FakeAttackedText("root")
         escape = FakeAttackedText("escape", modified_indices=(0,))
         success = FakeAttackedText("success", modified_indices=(0, 1))
@@ -300,7 +275,6 @@ class AsyncSearchTests(unittest.TestCase):
                 "success": (0.3, 0.4, True),
             },
             beam_size=1,
-            epsilon_mode="strict",
             infeasible_state_policy="discard",
         )
 
@@ -312,15 +286,15 @@ class AsyncSearchTests(unittest.TestCase):
         self.assertEqual(
             final.search_diagnostics["discarded_infeasible_state_count"], 1
         )
+        self.assertEqual(final.search_diagnostics["hard_discard_rate"], 1)
 
-    def test_hard_strict_allows_an_infeasible_root_to_recover(self):
+    def test_hard_pbs_expands_an_old_incorrect_root_once(self):
         root = FakeAttackedText("root")
         success = FakeAttackedText("success", modified_indices=(0,))
         harness = SearchHarness(
             {"root": (success,)},
             {"success": (0.3, 0.4, True)},
             beam_size=1,
-            epsilon_mode="strict",
             infeasible_state_policy="discard",
         )
 
@@ -329,10 +303,61 @@ class AsyncSearchTests(unittest.TestCase):
         )
 
         self.assertEqual(final.goal_status, GoalFunctionResultStatus.SUCCEEDED)
-        self.assertTrue(final.search_diagnostics["path_has_negative_old_margin"])
         self.assertFalse(
-            final.search_diagnostics["path_has_post_root_negative_old_margin"]
+            final.search_diagnostics[
+                "path_has_post_root_old_prediction_error"
+            ]
         )
+
+    def test_infeasible_fill_and_normalized_diversity_are_recorded(self):
+        root = FakeAttackedText("root")
+        feasible = FakeAttackedText("feasible", modified_indices=(0,))
+        infeasible = FakeAttackedText("infeasible", modified_indices=(1,))
+        harness = SearchHarness(
+            {"root": (feasible, infeasible)},
+            {
+                "feasible": (0.2, -0.2, False),
+                "infeasible": (-0.1, -0.1, False),
+            },
+            beam_size=2,
+        )
+
+        final = harness.search.perform_search(
+            _result(root, old_margin=0.5, new_margin=-0.5)
+        )
+
+        diagnostics = final.search_diagnostics
+        self.assertEqual(diagnostics["frontier_update_count"], 2)
+        self.assertEqual(diagnostics["frontier_state_slot_count"], 3)
+        self.assertEqual(diagnostics["infeasible_fill_event_rate"], 1)
+        self.assertAlmostEqual(
+            diagnostics["infeasible_retained_state_rate"], 2 / 3
+        )
+        self.assertEqual(
+            diagnostics["frontier_modified_set_diversity_mean"], 1
+        )
+
+    def test_non_top1_first_branch_is_attributed_to_success(self):
+        root = FakeAttackedText("root")
+        dynamic_top = FakeAttackedText("dynamic-top", modified_indices=(0, 1))
+        alternate = FakeAttackedText("alternate", modified_indices=(0,))
+        success = FakeAttackedText("success", modified_indices=(0, 1))
+        harness = SearchHarness(
+            {"root": (dynamic_top, alternate), "alternate": (success,)},
+            {
+                "dynamic-top": (0.2, 0.9, False),
+                "alternate": (0.2, 0.8, False),
+                "success": (0.3, 1.0, True),
+            },
+            beam_size=2,
+        )
+
+        final = harness.search.perform_search(
+            _result(root, old_margin=0.5, new_margin=-0.5)
+        )
+
+        self.assertEqual(final.goal_status, GoalFunctionResultStatus.SUCCEEDED)
+        self.assertEqual(final.search_diagnostics["root_dynamic_rank"], 2)
 
 
 if __name__ == "__main__":

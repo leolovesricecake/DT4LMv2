@@ -178,6 +178,11 @@ def _load_completed_results(run_dir, manifest):
             "Existing results.jsonl is incomplete or does not match manifest order; "
             "use a new experiment.id rather than overwriting partial results."
         )
+    if any(row.get("schema_version") != 4 for row in records):
+        raise ValueError(
+            "Existing results.jsonl predates the FF-PBS schema-v4 protocol; "
+            "remove or archive the old run directory before rerunning."
+        )
     invalid = [
         row.get("result_status")
         for row in records
@@ -189,13 +194,13 @@ def _load_completed_results(run_dir, manifest):
 
 
 def _load_schema_artifact(path):
-    """Return a metric artifact only when it is valid schema-v3 JSON."""
+    """Return a metric artifact only when it is valid schema-v4 JSON."""
 
     try:
         payload = _read_json(path)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
-    return payload if payload.get("schema_version") == 3 else None
+    return payload if payload.get("schema_version") == 4 else None
 
 
 def _core_evaluation_complete(run_dir, core_config, query_budget):
@@ -204,7 +209,7 @@ def _core_evaluation_complete(run_dir, core_config, query_budget):
     if (run_dir / "metrics" / "resources.json").exists():
         return False
     core = _load_schema_artifact(run_dir / "metrics" / "core.json")
-    queries = _load_schema_artifact(run_dir / "metrics" / "success_queries.json")
+    queries = _load_schema_artifact(run_dir / "metrics" / "query_data.json")
     if not core or not queries or not isinstance(core.get("resources"), dict):
         return False
     try:
@@ -219,13 +224,16 @@ def _core_evaluation_complete(run_dir, core_config, query_budget):
     if core.get("query_budget") != query_budget or actual_budgets != expected_budgets:
         return False
     data = queries.get("data") or {}
-    indices = data.get("dataset_index")
-    values = data.get("queries_to_success")
-    expected = queries.get("successful_sample_count")
-    return (
-        isinstance(indices, list)
-        and isinstance(values, list)
-        and len(indices) == len(values) == expected == core.get("successful")
+    columns = (
+        data.get("dataset_index"),
+        data.get("result_status"),
+        data.get("model_pair_queries"),
+        data.get("queries_to_success"),
+        data.get("budget_penalized_queries"),
+    )
+    expected = core.get("total")
+    return all(isinstance(column, list) for column in columns) and all(
+        len(column) == expected for column in columns
     )
 
 
@@ -356,37 +364,19 @@ def _attack_command(config, run_dir, manifest, project_root):
     if search is not None:
         command.extend(["--differential-search", str(search["method"])])
         if search["method"] == "async_frontier":
-            epsilon = search["epsilon"]
             command.extend(
                 [
                     "--differential-frontier-ranking",
                     str(search["ranking"]),
                     "--differential-beam-size",
                     str(search["beam_size"]),
-                    "--epsilon-mode",
-                    str(epsilon["mode"]),
                 ]
             )
-            if search["ranking"] == "epsilon_pareto":
+            if search["ranking"] != "dynamic":
                 command.extend(
                     [
                         "--infeasible-state-policy",
-                        str(
-                            epsilon.get(
-                                "infeasible_state_policy", "feasibility_first"
-                            )
-                        ),
-                    ]
-                )
-            if epsilon["mode"] == "adaptive":
-                command.extend(
-                    [
-                        "--epsilon-initial-quantile",
-                        str(epsilon["initial_quantile"]),
-                        "--epsilon-initialization-max-expansions",
-                        str(epsilon["initialization_max_expansions"]),
-                        "--epsilon-decay",
-                        str(epsilon["decay"]),
+                        str(search["infeasible_state_policy"]),
                     ]
                 )
             if search["diagnostics"]["trace_enabled"]:

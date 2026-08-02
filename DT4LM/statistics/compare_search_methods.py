@@ -16,22 +16,10 @@ VALID_STATUSES = frozenset(("successful", "failed", "skipped"))
 
 
 def _method_identity(config):
-    """Return the semantic method name and explicit infeasible policy."""
+    """Return the configured method name and explicit frontier policy."""
 
-    configured = config["experiment"]["method"]
     search = config["attack"].get("search") or {}
-    epsilon = search.get("epsilon") or {}
-    policy = epsilon.get("infeasible_state_policy")
-    if policy is None and search.get("ranking") == "epsilon_pareto":
-        policy = "feasibility_first"
-    method = configured
-    if (
-        configured == "strict-pbs"
-        and epsilon.get("mode") == "strict"
-        and "infeasible_state_policy" not in epsilon
-    ):
-        method = "feasibility-first-pbs"
-    return method, policy
+    return config["experiment"]["method"], search.get("infeasible_state_policy")
 
 
 def _read_json(path):
@@ -58,9 +46,14 @@ def _load_run(path):
     path = Path(path).resolve()
     manifest = _read_json(path / "sample_manifest.json")
     config = _read_yaml(path / "config.resolved.yaml")
+    core = _read_json(path / "metrics" / "core.json")
+    if core.get("schema_version") != 4:
+        raise ValueError(f"Paired comparison requires schema-v4 metrics in {path}.")
     records = _read_jsonl(path / "results.jsonl")
     indexed = {}
     for row in records:
+        if row.get("schema_version") != 4:
+            raise ValueError(f"Paired comparison requires schema-v4 rows in {path}.")
         status = row.get("result_status")
         if status not in VALID_STATUSES:
             raise ValueError(f"Invalid result status {status!r} in {path}.")
@@ -75,6 +68,7 @@ def _load_run(path):
         "path": path,
         "manifest": manifest,
         "config": config,
+        "core": core,
         "records": indexed,
     }
 
@@ -232,29 +226,16 @@ def compare_runs(baseline, candidate, *, bootstrap_samples=10000, seed=765):
         if isinstance(row.get("search_diagnostics"), dict)
         and row["search_diagnostics"].get("root_dynamic_rank") is not None
     ]
-    unique_escape = [
-        bool(row["search_diagnostics"].get("path_has_negative_old_margin"))
-        for row in candidate_unique_rows
-        if isinstance(row.get("search_diagnostics"), dict)
-        and row["search_diagnostics"].get("path_has_negative_old_margin") is not None
-    ]
-    unique_old_prediction_error = [
-        bool(row["search_diagnostics"].get("path_has_old_prediction_error"))
-        for row in candidate_unique_rows
-        if isinstance(row.get("search_diagnostics"), dict)
-        and row["search_diagnostics"].get("path_has_old_prediction_error")
-        is not None
-    ]
-    unique_post_root_escape = [
+    unique_recover = [
         bool(
             row["search_diagnostics"].get(
-                "path_has_post_root_negative_old_margin"
+                "path_has_post_root_old_prediction_error"
             )
         )
         for row in candidate_unique_rows
         if isinstance(row.get("search_diagnostics"), dict)
         and row["search_diagnostics"].get(
-            "path_has_post_root_negative_old_margin"
+            "path_has_post_root_old_prediction_error"
         )
         is not None
     ]
@@ -290,7 +271,7 @@ def compare_runs(baseline, candidate, *, bootstrap_samples=10000, seed=765):
     baseline_method, baseline_policy = _method_identity(baseline["config"])
     candidate_method, candidate_policy = _method_identity(candidate["config"])
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "baseline_run": str(baseline["path"]),
         "candidate_run": str(candidate["path"]),
         "dataset": baseline["config"]["dataset"]["id"],
@@ -322,6 +303,11 @@ def compare_runs(baseline, candidate, *, bootstrap_samples=10000, seed=765):
             for left, right in zip(baseline_success, candidate_success)
         ),
         "success_rate_difference": success_bootstrap,
+        "gsr_percentage_point_difference": (
+            success_bootstrap["estimate"] * 100.0
+            if success_bootstrap["estimate"] is not None
+            else None
+        ),
         "mcnemar_exact_pvalue": _mcnemar_exact(baseline_only, candidate_only),
         "common_success_queries": {
             "paired_median_difference": common_query_bootstrap,
@@ -348,16 +334,28 @@ def compare_runs(baseline, candidate, *, bootstrap_samples=10000, seed=765):
         "candidate_unique_success_mechanism": {
             "sample_count": len(candidate_unique_rows),
             "non_top1_rate": mean(unique_non_top1) if unique_non_top1 else None,
-            "escape_path_rate": mean(unique_escape) if unique_escape else None,
-            "old_prediction_error_path_rate": (
-                mean(unique_old_prediction_error)
-                if unique_old_prediction_error
+            "unique_post_root_old_prediction_error_path_rate": (
+                mean(unique_recover)
+                if unique_recover
                 else None
             ),
-            "post_root_escape_path_rate": (
-                mean(unique_post_root_escape)
-                if unique_post_root_escape
-                else None
+        },
+        "baseline_mechanism": {
+            "hard_discard_rate": baseline["core"].get("hard_discard_rate"),
+            "recover_path_rate": baseline["core"].get(
+                "post_root_old_prediction_error_path_rate"
+            ),
+            "infeasible_fill_event_rate": baseline["core"].get(
+                "infeasible_fill_event_rate"
+            ),
+        },
+        "candidate_mechanism": {
+            "hard_discard_rate": candidate["core"].get("hard_discard_rate"),
+            "recover_path_rate": candidate["core"].get(
+                "post_root_old_prediction_error_path_rate"
+            ),
+            "infeasible_fill_event_rate": candidate["core"].get(
+                "infeasible_fill_event_rate"
             ),
         },
     }

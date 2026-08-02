@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""Aggregate self-contained DT4LM run artifacts into one paper-ready CSV."""
+"""Aggregate schema-v4 DT4LM runs into one paper-facing CSV."""
 
 import argparse
 import csv
 import json
 import os
-import sys
 from pathlib import Path
+import sys
 
 import yaml
 
@@ -14,15 +14,14 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = Path("outputs/dt4lm-improvements/runs")
 DEFAULT_OUTPUT = "summary.csv"
+METRICS_SCHEMA_VERSION = 4
 QUALITY_METRICS = ("bleu", "meteor", "rouge_l", "bertscore")
 
 IDENTITY_COLUMNS = [
     "dataset",
     "model_pair",
     "method",
-    "configured_method",
     "seed",
-    "attack_seed",
     "experiment_id",
     "old_model",
     "old_revision",
@@ -35,19 +34,17 @@ IDENTITY_COLUMNS = [
     "search_method",
     "frontier_ranking",
     "beam_size",
-    "epsilon_mode",
-    "epsilon_initial_quantile",
-    "epsilon_initialization_max_expansions",
-    "epsilon_decay",
     "infeasible_state_policy",
     "query_budget",
     "manifest_split",
     "manifest_sample_count",
     "manifest_seed",
+    "manifest_selection_sha256",
 ]
 
 CORE_COLUMNS = [
     "total",
+    "attackable",
     "successful",
     "failed",
     "skipped",
@@ -57,13 +54,21 @@ CORE_COLUMNS = [
     "initial_already_differential",
     "paper_gsr",
     "sample_generation_rate",
+    "preexisting_differential_rate",
     "success_at_100",
+    "success_at_200",
+    "success_at_300",
+    "success_at_400",
     "success_at_500",
+    "success_at_600",
+    "success_at_700",
+    "success_at_800",
+    "success_at_900",
     "success_at_1000",
-    "sample_success_at_100",
-    "sample_success_at_500",
-    "sample_success_at_1000",
-    "sq_auc",
+    "success_query_auc",
+    "bpqc",
+    "normalized_bpqc",
+    "budget_penalized_queries_median",
     "amr",
     "model_pair_query_total",
     "model_pair_qps",
@@ -71,32 +76,34 @@ CORE_COLUMNS = [
     "successful_queries_median",
     "successful_queries_q1",
     "successful_queries_q3",
-    "budget_penalized_query_count",
-    "budget_penalized_queries_mean",
-    "budget_penalized_queries_median",
     "search_diagnostic_sample_count",
     "search_expansions_mean",
     "search_max_depth_mean",
+    "success_path_depth_mean",
+    "success_path_depth_median",
+    "frontier_update_count",
+    "frontier_state_slot_count",
     "frontier_size_mean",
     "frontier_size_max",
     "rank1_size_mean",
     "frontier_modified_set_diversity_mean",
     "frontier_depth_diversity_mean",
+    "infeasible_fill_event_rate",
+    "infeasible_retained_state_rate",
+    "hard_discarded_infeasible_state_count",
+    "hard_discard_rate",
+    "non_top1_path_rate",
+    "recover_path_count",
+    "post_root_old_prediction_error_path_rate",
+    "recover_first_infeasible_depth_mean",
+    "recover_first_infeasible_depth_median",
+    "recover_first_recovery_depth_mean",
+    "recover_first_recovery_depth_median",
+    "recover_depth_span_mean",
+    "recover_depth_span_median",
     "duplicate_state_rate",
     "query_cache_hit_rate",
     "budget_truncation_rate",
-    "non_top1_path_rate",
-    "escape_path_rate",
-    "root_inclusive_escape_path_rate",
-    "old_prediction_error_path_rate",
-    "root_inclusive_old_prediction_error_path_rate",
-    "post_root_escape_path_rate",
-    "post_root_old_prediction_error_path_rate",
-    "discarded_infeasible_state_count",
-    "discarded_infeasible_state_rate",
-    "epsilon_zero_initialization_rate",
-    "epsilon_to_root_margin_ratio_median",
-    "epsilon_initialization_expansion_mean",
 ]
 
 QUALITY_COLUMNS = [
@@ -113,6 +120,8 @@ RESOURCE_COLUMNS = [
     "end_to_end_seconds",
     "end_to_end_seconds_per_success",
     "peak_vram_bytes",
+    "frontier_sort_seconds",
+    "frontier_sort_time_ratio",
 ]
 
 PROVENANCE_COLUMNS = [
@@ -143,7 +152,7 @@ def _read_json(path):
 
 
 def _read_yaml(path):
-    """Load one resolved experiment config."""
+    """Load one resolved complete experiment config."""
 
     with open(path, encoding="utf-8") as handle:
         payload = yaml.safe_load(handle)
@@ -153,7 +162,7 @@ def _read_yaml(path):
 
 
 def _resolve_input(path):
-    """Resolve input relative to the checked-out DT4LM root."""
+    """Resolve an input path relative to the checked-out DT4LM root."""
 
     candidate = Path(path).expanduser()
     if candidate.is_absolute():
@@ -180,57 +189,26 @@ def discover_runs(input_dir):
     return sorted(path.parent for path in Path(input_dir).rglob("config.resolved.yaml"))
 
 
-def _model_value(config, key):
-    """Read a normalized or legacy model config value."""
+def _model_field(config, role, field):
+    """Read one field from a normalized old/new model specification."""
 
-    value = config["models"][key]
-    return value.get("name_or_path") if isinstance(value, dict) else value
-
-
-def _model_revision(config, key):
-    """Read an optional model revision from a normalized config."""
-
-    value = config["models"][key]
-    return value.get("revision") if isinstance(value, dict) else None
+    return config["models"][role].get(field)
 
 
-def _model_training_seed(config, key):
-    """Read optional training-seed provenance from a normalized model spec."""
-
-    value = config["models"][key]
-    return value.get("training_seed") if isinstance(value, dict) else None
-
-
-def _normalized_method(config):
-    """Relabel legacy strict-PBS artifacts by their actual frontier policy."""
-
-    configured = config["experiment"]["method"]
-    search = config["attack"].get("search") or {}
-    epsilon = search.get("epsilon") or {}
-    if (
-        configured == "strict-pbs"
-        and epsilon.get("mode") == "strict"
-        and "infeasible_state_policy" not in epsilon
-    ):
-        return "feasibility-first-pbs"
-    return configured
-
-
-def _validate_v3(run_dir, config, core, quality, queries, manifest):
-    """Reject stale or internally inconsistent metrics before CSV generation."""
+def _validate_v4(run_dir, config, core, quality, query_data, manifest):
+    """Reject incomplete or internally inconsistent schema-v4 artifacts."""
 
     for name, payload in (
         ("core.json", core),
         ("quality.json", quality),
-        ("success_queries.json", queries),
+        ("query_data.json", query_data),
     ):
-        if payload.get("schema_version") != 3:
+        if payload.get("schema_version") != METRICS_SCHEMA_VERSION:
             raise ValueError(
-                f"{run_dir / 'metrics' / name} is not schema v3; run "
+                f"{run_dir / 'metrics' / name} is not schema v4; run "
                 "statistics/recompute_metrics.py first."
             )
-    if core.get("total") != manifest.get("effective_sample_size"):
-        raise ValueError(f"Core total does not match sample manifest in {run_dir}.")
+
     total = core.get("total")
     successful = core.get("successful")
     failed = core.get("failed")
@@ -242,39 +220,44 @@ def _validate_v3(run_dir, config, core, quality, queries, manifest):
         raise ValueError(f"Core counts must be integers in {run_dir}.")
     if total != successful + failed + skipped:
         raise ValueError(f"Core counts do not satisfy N=S+F+K in {run_dir}.")
+    if core.get("attackable") != successful + failed:
+        raise ValueError(f"Core attackable count is inconsistent in {run_dir}.")
+    if total != manifest.get("effective_sample_size"):
+        raise ValueError(f"Core total does not match the manifest in {run_dir}.")
     if core.get("query_budget") != config["attack"]["query_budget"]:
         raise ValueError(f"Core query budget does not match config in {run_dir}.")
+    if query_data.get("query_budget") != core.get("query_budget"):
+        raise ValueError(f"Query data budget does not match core in {run_dir}.")
+
     dataset = config["dataset"]
     if manifest.get("dataset_id") not in {None, dataset["id"]}:
         raise ValueError(f"Manifest dataset does not match config in {run_dir}.")
     configured_split = (dataset.get("evaluation") or {}).get("split")
     if configured_split and manifest.get("split") != configured_split:
         raise ValueError(f"Manifest split does not match config in {run_dir}.")
-    data = queries.get("data") or {}
-    indices = data.get("dataset_index")
-    query_counts = data.get("queries_to_success")
-    expected = core.get("successful")
-    if not (
-        isinstance(indices, list)
-        and isinstance(query_counts, list)
-        and len(indices) == len(query_counts) == expected
-        and queries.get("successful_sample_count") == expected
-        and core.get("successful_query_count") == expected
-    ):
-        raise ValueError(f"Success-query columns are inconsistent in {run_dir}.")
-    selected = set(manifest.get("selected_indices") or [])
-    if selected and (len(set(indices)) != len(indices) or not set(indices) <= selected):
-        raise ValueError(f"Success-query indices do not belong to manifest in {run_dir}.")
-    query_budget = core["query_budget"]
-    if any(
-        not isinstance(value, int) or value <= 0 or value > query_budget
-        for value in query_counts
-    ):
-        raise ValueError(f"Success-query values exceed the budget in {run_dir}.")
-    if quality.get("successful_sample_count") != expected:
-        raise ValueError(f"Quality sample count does not match successes in {run_dir}.")
+
+    data = query_data.get("data") or {}
+    column_names = (
+        "dataset_index",
+        "result_status",
+        "model_pair_queries",
+        "queries_to_success",
+        "budget_penalized_queries",
+    )
+    columns = [data.get(name) for name in column_names]
+    if not all(isinstance(column, list) and len(column) == total for column in columns):
+        raise ValueError(f"Query-data columns are inconsistent in {run_dir}.")
+    if data["dataset_index"] != manifest.get("selected_indices"):
+        raise ValueError(f"Query-data order does not match manifest in {run_dir}.")
+    if query_data.get("sample_count") != total:
+        raise ValueError(f"Query-data sample count is inconsistent in {run_dir}.")
+    if query_data.get("successful_sample_count") != successful:
+        raise ValueError(f"Query-data success count is inconsistent in {run_dir}.")
+
+    if quality.get("successful_sample_count") != successful:
+        raise ValueError(f"Quality sample count does not match core in {run_dir}.")
     if set(quality.get("metrics") or {}) != set(QUALITY_METRICS):
-        raise ValueError(f"Quality artifact does not contain four metrics in {run_dir}.")
+        raise ValueError(f"Quality artifact lacks the four metrics in {run_dir}.")
 
 
 def _quality_fields(quality):
@@ -283,20 +266,16 @@ def _quality_fields(quality):
     metrics = quality.get("metrics") or {}
     fields = {"quality_successful_sample_count": quality.get("successful_sample_count")}
     fields["bleu"] = ((metrics.get("bleu") or {}).get("values") or {}).get("value")
-    fields["meteor"] = ((metrics.get("meteor") or {}).get("values") or {}).get("value")
-    fields["rouge_l"] = (
-        (metrics.get("rouge_l") or {}).get("values") or {}
-    ).get("value")
+    fields["meteor"] = ((metrics.get("meteor") or {}).get("values") or {}).get(
+        "value"
+    )
+    fields["rouge_l"] = ((metrics.get("rouge_l") or {}).get("values") or {}).get(
+        "value"
+    )
     bertscore = ((metrics.get("bertscore") or {}).get("values") or {})
     for name in ("precision", "recall", "f1"):
         fields[f"bertscore_{name}"] = bertscore.get(name)
     return fields
-
-
-def _resource_fields(resources):
-    """Flatten paper-facing resource measurements."""
-
-    return {name: resources.get(name) for name in RESOURCE_COLUMNS}
 
 
 def build_row(run_dir):
@@ -305,54 +284,40 @@ def build_row(run_dir):
     config = _read_yaml(run_dir / "config.resolved.yaml")
     core = _read_json(run_dir / "metrics" / "core.json")
     quality = _read_json(run_dir / "metrics" / "quality.json")
-    queries = _read_json(run_dir / "metrics" / "success_queries.json")
+    query_data = _read_json(run_dir / "metrics" / "query_data.json")
     manifest = _read_json(run_dir / "sample_manifest.json")
     provenance = _read_json(run_dir / "provenance.json")
-    _validate_v3(run_dir, config, core, quality, queries, manifest)
+    _validate_v4(run_dir, config, core, quality, query_data, manifest)
 
     experiment = config["experiment"]
     attack = config["attack"]
     search = attack.get("search") or {"method": "legacy_greedy"}
-    epsilon = search.get("epsilon") or {}
-    infeasible_state_policy = epsilon.get("infeasible_state_policy")
-    if (
-        infeasible_state_policy is None
-        and search.get("ranking") == "epsilon_pareto"
-    ):
-        infeasible_state_policy = "feasibility_first"
+    initial = core.get("initial_state_counts") or {}
     core_runtime = core.get("evaluation_runtime") or {}
     quality_runtime = quality.get("evaluation_runtime") or {}
-    initial = core.get("initial_state_counts") or {}
     row = {
         "dataset": config["dataset"]["id"],
         "model_pair": config["models"]["id"],
-        "method": _normalized_method(config),
-        "configured_method": experiment["method"],
+        "method": experiment["method"],
         "seed": experiment["seed"],
-        "attack_seed": experiment["seed"],
         "experiment_id": experiment["id"],
-        "old_model": _model_value(config, "old"),
-        "old_revision": _model_revision(config, "old"),
-        "old_model_training_seed": _model_training_seed(config, "old"),
-        "new_model": _model_value(config, "new"),
-        "new_revision": _model_revision(config, "new"),
-        "new_model_training_seed": _model_training_seed(config, "new"),
+        "old_model": _model_field(config, "old", "name_or_path"),
+        "old_revision": _model_field(config, "old", "revision"),
+        "old_model_training_seed": _model_field(config, "old", "training_seed"),
+        "new_model": _model_field(config, "new", "name_or_path"),
+        "new_revision": _model_field(config, "new", "revision"),
+        "new_model_training_seed": _model_field(config, "new", "training_seed"),
         "recipe": attack["recipe"],
         "differential_objective": attack["differential_objective"],
         "search_method": search["method"],
         "frontier_ranking": search.get("ranking"),
         "beam_size": search.get("beam_size"),
-        "epsilon_mode": epsilon.get("mode"),
-        "epsilon_initial_quantile": epsilon.get("initial_quantile"),
-        "epsilon_initialization_max_expansions": epsilon.get(
-            "initialization_max_expansions"
-        ),
-        "epsilon_decay": epsilon.get("decay"),
-        "infeasible_state_policy": infeasible_state_policy,
+        "infeasible_state_policy": search.get("infeasible_state_policy"),
         "query_budget": attack["query_budget"],
         "manifest_split": manifest.get("split"),
         "manifest_sample_count": manifest.get("effective_sample_size"),
         "manifest_seed": manifest.get("seed"),
+        "manifest_selection_sha256": manifest.get("selection_sha256"),
         "initial_both_correct": initial.get("both_correct"),
         "initial_new_correct_old_wrong": initial.get("new_correct_old_wrong"),
         "initial_both_wrong": initial.get("both_wrong"),
@@ -366,29 +331,29 @@ def build_row(run_dir):
         if not name.startswith("initial_"):
             row[name] = core.get(name)
     for name, value in core.items():
-        if name.startswith("success_at_") or name.startswith("sample_success_at_"):
+        if name.startswith("success_at_"):
             row[name] = value
     row.update(_quality_fields(quality))
-    row.update(_resource_fields(core.get("resources") or {}))
+    resources = core.get("resources") or {}
+    row.update({name: resources.get(name) for name in RESOURCE_COLUMNS})
     return row
 
 
 def _dynamic_budget_columns(rows):
-    """Preserve nonstandard configured Success@B metrics in the CSV."""
+    """Preserve configured Success@B values beyond the standard paper grid."""
 
     known = set(CORE_COLUMNS)
     dynamic = {
         key
         for row in rows
         for key in row
-        if (key.startswith("success_at_") or key.startswith("sample_success_at_"))
-        and key not in known
+        if key.startswith("success_at_") and key not in known
     }
-    return sorted(dynamic, key=lambda key: (int(key.rsplit("_", 1)[-1]), key))
+    return sorted(dynamic, key=lambda key: int(key.rsplit("_", 1)[-1]))
 
 
 def write_summary(input_dir, output_path):
-    """Aggregate all discovered runs and atomically replace one CSV."""
+    """Aggregate complete runs and atomically replace one CSV."""
 
     run_dirs = discover_runs(input_dir)
     if not run_dirs:
@@ -400,10 +365,7 @@ def write_summary(input_dir, output_path):
             rows.append(build_row(run_dir))
         except FileNotFoundError as exc:
             skipped += 1
-            print(
-                f"Skipping incomplete experiment {run_dir}: {exc}",
-                file=sys.stderr,
-            )
+            print(f"Skipping incomplete experiment {run_dir}: {exc}", file=sys.stderr)
     if skipped:
         print(f"Skipped {skipped} incomplete experiment(s).", file=sys.stderr)
     rows.sort(

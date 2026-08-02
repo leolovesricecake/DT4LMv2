@@ -1,18 +1,18 @@
-"""Pure ranking utilities for differential asynchronous frontier search.
+"""Pure ranking policies for bounded differential-search frontiers.
 
-The functions in this module intentionally do not import TextAttack model or
-attack classes. Keeping the numerical policy independent makes Pareto ranking,
-epsilon scheduling, and deterministic tie-breaking testable in isolation.
+This module deliberately depends only on the small search-state protocol. It
+keeps feasibility-first ordering, Pareto ranking, and deterministic tie-breaks
+testable without importing model or TextAttack runtime classes.
 """
 
 from dataclasses import dataclass
 import math
-from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 
 @dataclass(frozen=True)
 class FrontierRank:
-    """Current epsilon-feasibility and Pareto metadata for one search state."""
+    """Feasibility and ranking metadata for one current search state."""
 
     feasible: bool
     violation: float
@@ -20,126 +20,46 @@ class FrontierRank:
     crowding_distance: float = 0.0
 
 
-def linear_quantile(values: Iterable[float], quantile: float) -> float:
-    """Return a deterministic linearly interpolated sample quantile."""
-
-    values = sorted(float(value) for value in values)
-    if not values:
-        raise ValueError("Cannot calculate a quantile from an empty sequence.")
-    if not 0.0 <= quantile <= 1.0:
-        raise ValueError("quantile must lie in the closed interval [0, 1].")
-    if any(not math.isfinite(value) for value in values):
-        raise ValueError("Quantile values must be finite.")
-
-    position = (len(values) - 1) * float(quantile)
-    lower_index = int(math.floor(position))
-    upper_index = int(math.ceil(position))
-    if lower_index == upper_index:
-        return values[lower_index]
-    fraction = position - lower_index
-    return values[lower_index] + fraction * (
-        values[upper_index] - values[lower_index]
-    )
-
-
-def summarize_values(values: Iterable[float]) -> Mapping[str, float]:
-    """Return a compact distribution summary without retaining raw values."""
-
-    values = [float(value) for value in values]
-    if not values:
-        return {
-            "count": 0,
-            "min": None,
-            "q1": None,
-            "median": None,
-            "q3": None,
-            "max": None,
-        }
-    return {
-        "count": len(values),
-        "min": min(values),
-        "q1": linear_quantile(values, 0.25),
-        "median": linear_quantile(values, 0.50),
-        "q3": linear_quantile(values, 0.75),
-        "max": max(values),
-    }
-
-
-def estimate_initial_epsilon(violations: Iterable[float], quantile: float) -> float:
-    """Estimate epsilon from strictly positive old-margin violations."""
-
-    positive = [float(value) for value in violations if float(value) > 0.0]
-    return linear_quantile(positive, quantile) if positive else 0.0
-
-
-def epsilon_at(
-    epsilon_0: float,
-    query_count: int,
-    query_budget: int,
-    decay: str,
-) -> float:
-    """Calculate query-budget-driven linear or quadratic epsilon decay."""
-
-    epsilon_0 = float(epsilon_0)
-    if epsilon_0 < 0.0 or not math.isfinite(epsilon_0):
-        raise ValueError("epsilon_0 must be finite and non-negative.")
-    if query_budget <= 0:
-        raise ValueError("query_budget must be positive.")
-    if decay not in {"linear", "quadratic"}:
-        raise ValueError("decay must be either 'linear' or 'quadratic'.")
-
-    progress = min(max(float(query_count) / float(query_budget), 0.0), 1.0)
-    remaining = 1.0 - progress
-    exponent = 1 if decay == "linear" else 2
-    return epsilon_0 * (remaining**exponent)
-
-
-def constraint_violation(old_correct_margin: float, epsilon: float) -> float:
-    """Return violation of ``old_margin >= -epsilon``."""
-
-    old_correct_margin = float(old_correct_margin)
-    epsilon = float(epsilon)
-    if not math.isfinite(old_correct_margin):
-        raise ValueError("old_correct_margin must be finite.")
-    if epsilon < 0.0 or not math.isfinite(epsilon):
-        raise ValueError("epsilon must be finite and non-negative.")
-    return max(0.0, -epsilon - old_correct_margin)
-
-
-def strictly_feasible_states(states: Sequence) -> List:
-    """Keep only states where the old model actually predicts the label."""
-
-    retained = []
-    for state in states:
-        old_is_correct = getattr(state, "old_is_correct", None)
-        if not isinstance(old_is_correct, bool):
-            raise TypeError(
-                "Strict feasibility requires a boolean old_is_correct field."
-            )
-        if old_is_correct:
-            retained.append(state)
-    return retained
-
-
 def _validate_states(states: Sequence) -> None:
-    """Validate the minimal state protocol required by frontier ranking."""
+    """Validate the minimal state fields required by every ranking policy."""
 
     state_ids = set()
     for state in states:
-        state_id = state.state_id
-        if state_id in state_ids:
-            raise ValueError(f"Duplicate state_id in frontier: {state_id!r}.")
-        state_ids.add(state_id)
-        for name in ("old_correct_margin", "new_error_margin", "modification_cost"):
+        if state.state_id in state_ids:
+            raise ValueError(f"Duplicate state_id in frontier: {state.state_id!r}.")
+        state_ids.add(state.state_id)
+        if not isinstance(getattr(state, "old_is_correct", None), bool):
+            raise TypeError("Frontier states require boolean old_is_correct values.")
+        for name in (
+            "old_correct_margin",
+            "new_error_margin",
+            "modification_cost",
+        ):
             value = float(getattr(state, name))
             if not math.isfinite(value):
-                raise ValueError(f"State {state_id!r} has non-finite {name}.")
+                raise ValueError(f"State {state.state_id!r} has non-finite {name}.")
         if float(state.modification_cost) < 0.0:
             raise ValueError("modification_cost cannot be negative.")
 
 
+def infeasible_violation(state) -> float:
+    """Measure distance from the old-model decision boundary for tie-breaking."""
+
+    if state.old_is_correct:
+        return 0.0
+    return max(0.0, -float(state.old_correct_margin))
+
+
+def strictly_feasible_states(states: Sequence) -> List:
+    """Keep only states where the old model actually predicts the true label."""
+
+    states = list(states)
+    _validate_states(states)
+    return [state for state in states if state.old_is_correct]
+
+
 def _dominates(left, right) -> bool:
-    """Return whether left Pareto-dominates right on margin and cost."""
+    """Return whether left dominates right on new margin and modification cost."""
 
     no_worse = (
         left.new_error_margin >= right.new_error_margin
@@ -153,7 +73,7 @@ def _dominates(left, right) -> bool:
 
 
 def non_dominated_fronts(states: Sequence) -> List[List]:
-    """Partition states into deterministic Pareto fronts."""
+    """Partition feasible states into deterministic Pareto fronts."""
 
     states = list(states)
     _validate_states(states)
@@ -161,8 +81,8 @@ def non_dominated_fronts(states: Sequence) -> List[List]:
     dominated = {state.state_id: [] for state in states}
     state_by_id = {state.state_id: state for state in states}
 
-    # The frontier is bounded by the query budget, so the transparent O(n^2)
-    # implementation is preferable to a more fragile specialized sorter.
+    # Frontier sizes are deliberately small, making the transparent O(n^2)
+    # sorter easier to audit than a specialized implementation.
     for left in states:
         for right in states:
             if left.state_id == right.state_id:
@@ -187,19 +107,17 @@ def non_dominated_fronts(states: Sequence) -> List[List]:
                 if domination_counts[dominated_id] == 0:
                     next_ids.append(dominated_id)
         current_ids = sorted(
-            set(next_ids), key=lambda state_id: state_by_id[state_id].generation_order
+            set(next_ids), key=lambda value: state_by_id[value].generation_order
         )
     return fronts
 
 
 def crowding_distances(front: Sequence) -> Dict[int, float]:
-    """Calculate normalized NSGA-II crowding distances for one front."""
+    """Calculate normalized NSGA-II crowding distance for one Pareto front."""
 
     front = list(front)
     _validate_states(front)
     distances = {state.state_id: 0.0 for state in front}
-    if not front:
-        return distances
     if len(front) <= 2:
         return {state.state_id: float("inf") for state in front}
 
@@ -213,11 +131,11 @@ def crowding_distances(front: Sequence) -> Dict[int, float]:
         )
         minimum = objective(ordered[0])
         maximum = objective(ordered[-1])
-        distances[ordered[0].state_id] = float("inf")
-        distances[ordered[-1].state_id] = float("inf")
         objective_range = maximum - minimum
         if objective_range == 0.0:
             continue
+        distances[ordered[0].state_id] = float("inf")
+        distances[ordered[-1].state_id] = float("inf")
         for index in range(1, len(ordered) - 1):
             state_id = ordered[index].state_id
             if math.isinf(distances[state_id]):
@@ -228,22 +146,31 @@ def crowding_distances(front: Sequence) -> Dict[int, float]:
     return distances
 
 
-def epsilon_pareto_order(
-    states: Sequence, epsilon: float
+def _infeasible_key(state):
+    """Order frontier fillers by violation, new margin, cost, and stability."""
+
+    return (
+        infeasible_violation(state),
+        -float(state.new_error_margin),
+        float(state.modification_cost),
+        state.generation_order,
+    )
+
+
+def feasibility_pareto_order(
+    states: Sequence,
 ) -> Tuple[List, Dict[int, FrontierRank]]:
-    """Order states by constrained Pareto rank and deterministic tie-breaks."""
+    """Order feasible Pareto fronts before minimum-violation fillers."""
 
     states = list(states)
     _validate_states(states)
-    feasible = []
-    metadata = {}
-    for state in states:
-        violation = constraint_violation(state.old_correct_margin, epsilon)
-        if violation == 0.0:
-            feasible.append(state)
-        else:
-            metadata[state.state_id] = FrontierRank(False, violation)
-
+    feasible = [state for state in states if state.old_is_correct]
+    infeasible = [state for state in states if not state.old_is_correct]
+    metadata = {
+        state.state_id: FrontierRank(False, infeasible_violation(state))
+        for state in infeasible
+    }
+    ordered_feasible = []
     for rank, front in enumerate(non_dominated_fronts(feasible), start=1):
         distances = crowding_distances(front)
         for state in front:
@@ -253,31 +180,62 @@ def epsilon_pareto_order(
                 pareto_rank=rank,
                 crowding_distance=distances[state.state_id],
             )
-
-    def order_key(state):
-        state_rank = metadata[state.state_id]
-        if state_rank.feasible:
-            return (
-                0,
-                state_rank.pareto_rank,
-                -state_rank.crowding_distance,
-                -float(state.new_error_margin),
-                float(state.modification_cost),
-                state.generation_order,
+        ordered_feasible.extend(
+            sorted(
+                front,
+                key=lambda state: (
+                    -distances[state.state_id],
+                    -float(state.new_error_margin),
+                    float(state.modification_cost),
+                    state.generation_order,
+                ),
             )
-        return (
-            1,
-            state_rank.violation,
-            -float(state.new_error_margin),
-            float(state.modification_cost),
-            state.generation_order,
         )
+    return ordered_feasible + sorted(infeasible, key=_infeasible_key), metadata
 
-    return sorted(states, key=order_key), metadata
+
+def feasibility_mnew_order(
+    states: Sequence,
+) -> Tuple[List, Dict[int, FrontierRank]]:
+    """Rank feasible states only by new-model error margin.
+
+    Modification cost is intentionally absent from feasible-state tie-breaking;
+    this policy is the controlled ablation for FF-PBS's second Pareto objective.
+    Infeasible fillers retain the common FF-PBS ordering.
+    """
+
+    states = list(states)
+    _validate_states(states)
+    feasible = [state for state in states if state.old_is_correct]
+    infeasible = [state for state in states if not state.old_is_correct]
+    ordered_feasible = sorted(
+        feasible,
+        key=lambda state: (-float(state.new_error_margin), state.generation_order),
+    )
+    best_margin = (
+        float(ordered_feasible[0].new_error_margin) if ordered_feasible else None
+    )
+    metadata = {
+        state.state_id: FrontierRank(
+            True,
+            0.0,
+            pareto_rank=(
+                1 if float(state.new_error_margin) == best_margin else 2
+            ),
+        )
+        for state in feasible
+    }
+    metadata.update(
+        {
+            state.state_id: FrontierRank(False, infeasible_violation(state))
+            for state in infeasible
+        }
+    )
+    return ordered_feasible + sorted(infeasible, key=_infeasible_key), metadata
 
 
 def dynamic_order(states: Sequence) -> List:
-    """Order asynchronous states by the legacy dynamic scalar score."""
+    """Order asynchronous states by the original DT4LM dynamic scalar score."""
 
     states = list(states)
     _validate_states(states)
@@ -294,16 +252,17 @@ def select_frontier(
     states: Sequence,
     beam_size: int,
     ranking: str,
-    epsilon: float = 0.0,
 ) -> Tuple[List, Dict[int, FrontierRank]]:
     """Select at most ``beam_size`` states under one configured policy."""
 
     if beam_size <= 0:
         raise ValueError("beam_size must be positive.")
     if ranking == "dynamic":
-        ordered = dynamic_order(states)
-        return ordered[:beam_size], {}
-    if ranking == "epsilon_pareto":
-        ordered, metadata = epsilon_pareto_order(states, epsilon)
+        return dynamic_order(states)[:beam_size], {}
+    if ranking == "feasibility_pareto":
+        ordered, metadata = feasibility_pareto_order(states)
+        return ordered[:beam_size], metadata
+    if ranking == "feasibility_mnew":
+        ordered, metadata = feasibility_mnew_order(states)
         return ordered[:beam_size], metadata
     raise ValueError(f"Unknown frontier ranking {ranking!r}.")

@@ -32,7 +32,13 @@ def _write_run(path, rows, method):
         "experiment": {"method": method},
         "dataset": {"id": "sst2"},
         "models": {"id": "old-new"},
-        "attack": {"query_budget": 100},
+        "attack": {
+            "query_budget": 100,
+            "search": {
+                "ranking": "feasibility_pareto",
+                "infeasible_state_policy": "fill",
+            },
+        },
     }
     (path / "sample_manifest.json").write_text(
         json.dumps(manifest), encoding="utf-8"
@@ -43,24 +49,40 @@ def _write_run(path, rows, method):
     (path / "results.jsonl").write_text(
         "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
     )
+    metrics = path / "metrics"
+    metrics.mkdir()
+    (metrics / "core.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "hard_discard_rate": None,
+                "post_root_old_prediction_error_path_rate": 0.5,
+                "infeasible_fill_event_rate": 0.25,
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 class ComparisonTests(unittest.TestCase):
     def test_paired_outcomes_and_penalized_queries(self):
         baseline_rows = [
             {
+                "schema_version": 4,
                 "dataset_index": 0,
                 "result_status": "successful",
                 "queries_to_success": 20,
                 "modification_rate": 0.2,
             },
             {
+                "schema_version": 4,
                 "dataset_index": 1,
                 "result_status": "failed",
                 "queries_to_success": None,
                 "modification_rate": 0.0,
             },
             {
+                "schema_version": 4,
                 "dataset_index": 2,
                 "result_status": "skipped",
                 "queries_to_success": None,
@@ -69,28 +91,29 @@ class ComparisonTests(unittest.TestCase):
         ]
         candidate_rows = [
             {
+                "schema_version": 4,
                 "dataset_index": 0,
                 "result_status": "successful",
                 "queries_to_success": 10,
                 "modification_rate": 0.1,
                 "search_diagnostics": {
                     "root_dynamic_rank": 1,
-                    "path_has_negative_old_margin": False,
+                    "path_has_post_root_old_prediction_error": False,
                 },
             },
             {
+                "schema_version": 4,
                 "dataset_index": 1,
                 "result_status": "successful",
                 "queries_to_success": 40,
                 "modification_rate": 0.3,
                 "search_diagnostics": {
                     "root_dynamic_rank": 2,
-                    "path_has_negative_old_margin": True,
-                    "path_has_old_prediction_error": True,
-                    "path_has_post_root_negative_old_margin": True,
+                    "path_has_post_root_old_prediction_error": True,
                 },
             },
             {
+                "schema_version": 4,
                 "dataset_index": 2,
                 "result_status": "skipped",
                 "queries_to_success": None,
@@ -100,7 +123,7 @@ class ComparisonTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _write_run(root / "baseline", baseline_rows, "base")
-            _write_run(root / "candidate", candidate_rows, "ae-pbs")
+            _write_run(root / "candidate", candidate_rows, "ff-pbs")
             # SciPy is optional for artifact assembly; this test isolates the
             # deterministic pairing and bootstrap layers.
             original_wilcoxon = comparison._wilcoxon
@@ -123,16 +146,11 @@ class ComparisonTests(unittest.TestCase):
         )
         self.assertEqual(
             result["candidate_unique_success_mechanism"][
-                "old_prediction_error_path_rate"
+                "unique_post_root_old_prediction_error_path_rate"
             ],
             1,
         )
-        self.assertEqual(
-            result["candidate_unique_success_mechanism"][
-                "post_root_escape_path_rate"
-            ],
-            1,
-        )
+        self.assertEqual(result["gsr_percentage_point_difference"], 50)
         self.assertEqual(
             result["budget_penalized_queries"]["paired_mean_difference"][
                 "estimate"

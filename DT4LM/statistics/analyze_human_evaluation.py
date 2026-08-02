@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Analyze paired, stratified SemDT human judgments with bootstrap CIs."""
+"""Analyze blinded Base/FF-PBS human judgments with bootstrap intervals."""
 
 import argparse
 from collections import defaultdict
@@ -10,12 +10,14 @@ from statistics import mean
 
 
 def read_jsonl(path):
+    """Read one completed human-review JSONL file."""
+
     with open(path, encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
 
 
 def _cohen_kappa(pairs):
-    """Calculate binary Cohen's kappa without an external statistics package."""
+    """Calculate binary Cohen's kappa without an external dependency."""
 
     if not pairs:
         return None
@@ -29,175 +31,159 @@ def _cohen_kappa(pairs):
     return (agreement - chance) / (1 - chance) if chance != 1 else 1.0
 
 
-def _method_estimates(
-    observations, populations, sample_count, attackable_counts=None
-):
-    """Estimate semantic rate and ValidGSR using actual success strata."""
-
-    by_method_stratum = defaultdict(list)
-    for observation in observations:
-        for method, value in observation["labels"].items():
-            by_method_stratum[(method, observation["stratum"])].append(value)
-    output = {}
-    for method in ("Base", "SemDT"):
-        numerator = 0.0
-        success_total = 0
-        strata = {}
-        for stratum, population in populations.items():
-            if method == "Base" and stratum == "semdt_only_success":
-                continue
-            if method == "SemDT" and stratum == "base_only_success":
-                continue
-            values = by_method_stratum.get((method, stratum), [])
-            if population and not values:
-                raise ValueError(
-                    f"No human labels for non-empty {method}/{stratum}."
-                )
-            rate = mean(values) if values else None
-            strata[stratum] = {
-                "population": population,
-                "sample_count": len(values),
-                "semantic_preservation_rate": rate,
-            }
-            if values:
-                numerator += population * rate
-                success_total += population
-        output[method] = {
-            "successful_generations": success_total,
-            "semantic_preservation_rate": (
-                numerator / success_total if success_total else None
-            ),
-            "valid_gsr": numerator / sample_count,
-            "valid_paper_gsr": (
-                numerator / attackable_counts[method]
-                if attackable_counts and attackable_counts.get(method)
-                else None
-            ),
-            "strata": strata,
-        }
-    return output
-
-
 def _percentile(values):
+    """Return a deterministic empirical 95% interval."""
+
     values = sorted(values)
+    if not values:
+        return None
     return [
         values[int(0.025 * (len(values) - 1))],
         values[int(0.975 * (len(values) - 1))],
     ]
 
 
+def _rates(observations):
+    """Calculate LPR, SPR, and their joint HVR for one uniform sample."""
+
+    if not observations:
+        return {"lpr": None, "spr": None, "hvr": None, "sample_count": 0}
+    return {
+        "lpr": mean(item["label_preserved"] for item in observations),
+        "spr": mean(item["semantic_preserved"] for item in observations),
+        "hvr": mean(
+            item["label_preserved"] and item["semantic_preserved"]
+            for item in observations
+        ),
+        "sample_count": len(observations),
+    }
+
+
+def _bootstrap_rates(observations, *, samples, rng):
+    """Bootstrap all three human-validity rates by review unit."""
+
+    if not observations:
+        return {"lpr": None, "spr": None, "hvr": None}
+    replicates = {"lpr": [], "spr": [], "hvr": []}
+    for _ in range(samples):
+        draw = [rng.choice(observations) for _ in observations]
+        rates = _rates(draw)
+        for name in replicates:
+            replicates[name].append(rates[name])
+    return {name: _percentile(values) for name, values in replicates.items()}
+
+
+def _load_core(path, expected_total):
+    """Load schema-v4 GSR needed to estimate ValidGSR."""
+
+    with open(path, encoding="utf-8") as handle:
+        core = json.load(handle)
+    if core.get("schema_version") != 4:
+        raise ValueError(f"Human analysis requires schema-v4 core metrics: {path}.")
+    if core.get("total") != expected_total:
+        raise ValueError("Core metrics and human-evaluation manifest sizes differ.")
+    return core
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--reviews", required=True)
     parser.add_argument("--key", required=True)
+    parser.add_argument("--base-core", required=True)
+    parser.add_argument("--ffpbs-core", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=765)
-    parser.add_argument("--base-core")
-    parser.add_argument("--semdt-core")
     args = parser.parse_args()
+    if args.bootstrap_samples <= 0:
+        raise ValueError("--bootstrap-samples must be positive.")
 
     reviews = {row["review_id"]: row for row in read_jsonl(args.reviews)}
     with open(args.key, encoding="utf-8") as handle:
         key = json.load(handle)
-    observations = []
-    reviewer_pairs = []
+    if key.get("schema_version") != 2:
+        raise ValueError("Human-evaluation key must use schema version 2.")
+
+    observations_by_cohort = defaultdict(list)
+    label_pairs = []
+    semantic_pairs = []
     for mapping in key["rows"]:
         row = reviews[mapping["review_id"]]
-        labels = {}
-        for side in ("a", "b"):
-            method = mapping.get(f"candidate_{side}_method")
-            if method is None:
-                continue
-            reviewer_left = row.get(f"reviewer_1_{side}")
-            reviewer_right = row.get(f"reviewer_2_{side}")
-            final = row.get(f"final_{side}")
-            if type(reviewer_left) is not bool or type(reviewer_right) is not bool:
+        values = {}
+        for dimension in ("label_preserved", "semantic_preserved"):
+            left = row.get(f"reviewer_1_{dimension}")
+            right = row.get(f"reviewer_2_{dimension}")
+            final = row.get(f"final_{dimension}")
+            if type(left) is not bool or type(right) is not bool:
                 raise ValueError(
-                    f"{mapping['review_id']} is missing two boolean reviews."
+                    f"{mapping['review_id']} lacks two boolean {dimension} reviews."
                 )
-            reviewer_pairs.append((reviewer_left, reviewer_right))
-            if final is None and reviewer_left == reviewer_right:
-                final = reviewer_left
+            if final is None and left == right:
+                final = left
             if type(final) is not bool:
                 raise ValueError(
-                    f"{mapping['review_id']} needs a boolean adjudicated label."
+                    f"{mapping['review_id']} needs adjudicated {dimension}."
                 )
-            labels[method] = final
-        observations.append(
-            {
-                "review_id": mapping["review_id"],
-                "stratum": mapping["stratum"],
-                "labels": labels,
-            }
-        )
-
-    populations = key["stratum_populations"]
-    sample_count = int(key["manifest_sample_count"])
-    attackable_counts = None
-    if args.base_core or args.semdt_core:
-        if not args.base_core or not args.semdt_core:
-            raise ValueError("--base-core and --semdt-core must be provided together.")
-        with open(args.base_core, encoding="utf-8") as handle:
-            base_core = json.load(handle)
-        with open(args.semdt_core, encoding="utf-8") as handle:
-            semdt_core = json.load(handle)
-        if base_core["total"] != sample_count or semdt_core["total"] != sample_count:
-            raise ValueError("Core metrics and human-evaluation manifest sizes differ.")
-        attackable_counts = {
-            "Base": int(base_core["attackable"]),
-            "SemDT": int(semdt_core["attackable"]),
-        }
-    estimates = _method_estimates(
-        observations, populations, sample_count, attackable_counts
-    )
-    by_stratum = defaultdict(list)
-    for observation in observations:
-        by_stratum[observation["stratum"]].append(observation)
-    rng = random.Random(args.seed)
-    bootstrap = {
-        method: {
-            "semantic_preservation_rate": [],
-            "valid_gsr": [],
-            "valid_paper_gsr": [],
-        }
-        for method in ("Base", "SemDT")
-    }
-    for _ in range(args.bootstrap_samples):
-        # Resampling whole common-success rows preserves the paired judgments.
-        resampled = []
-        for rows in by_stratum.values():
-            resampled.extend(rng.choice(rows) for _ in rows)
-        iteration = _method_estimates(
-            resampled, populations, sample_count, attackable_counts
-        )
-        for method in bootstrap:
-            for metric in bootstrap[method]:
-                value = iteration[method][metric]
-                if value is not None:
-                    bootstrap[method][metric].append(value)
-    for method in estimates:
-        for metric, values in bootstrap[method].items():
-            estimates[method][f"{metric}_bootstrap_95"] = (
-                _percentile(values) if values else None
+            values[dimension] = final
+            (label_pairs if dimension == "label_preserved" else semantic_pairs).append(
+                (left, right)
             )
+        observation = {
+            "review_id": mapping["review_id"],
+            "label_preserved": values["label_preserved"],
+            "semantic_preserved": values["semantic_preserved"],
+        }
+        for cohort in mapping["cohorts"]:
+            observations_by_cohort[cohort].append(observation)
 
-    agreement = sum(left == right for left, right in reviewer_pairs) / len(
-        reviewer_pairs
+    total = int(key["manifest_sample_count"])
+    cores = {
+        "Base": _load_core(args.base_core, total),
+        "FF-PBS": _load_core(args.ffpbs_core, total),
+    }
+    method_cohorts = {"Base": "base_overall", "FF-PBS": "ffpbs_overall"}
+    rng = random.Random(args.seed)
+    methods = {}
+    for method, cohort in method_cohorts.items():
+        observations = observations_by_cohort[cohort]
+        rates = _rates(observations)
+        intervals = _bootstrap_rates(
+            observations, samples=args.bootstrap_samples, rng=rng
+        )
+        gsr = cores[method]["paper_gsr"]
+        valid_gsr_replicates = []
+        if observations and gsr is not None:
+            for _ in range(args.bootstrap_samples):
+                draw = [rng.choice(observations) for _ in observations]
+                valid_gsr_replicates.append(gsr * _rates(draw)["hvr"])
+        methods[method] = {
+            **rates,
+            "lpr_bootstrap_95": intervals["lpr"],
+            "spr_bootstrap_95": intervals["spr"],
+            "hvr_bootstrap_95": intervals["hvr"],
+            "paper_gsr": gsr,
+            "valid_gsr": gsr * rates["hvr"] if rates["hvr"] is not None else None,
+            "valid_gsr_bootstrap_95": _percentile(valid_gsr_replicates),
+        }
+
+    unique_observations = observations_by_cohort["ffpbs_unique"]
+    unique_rates = _rates(unique_observations)
+    unique_intervals = _bootstrap_rates(
+        unique_observations, samples=args.bootstrap_samples, rng=rng
     )
     output = {
-        "methods": estimates,
-        "reviewer_agreement": agreement,
-        "cohen_kappa": _cohen_kappa(reviewer_pairs),
+        "schema_version": 2,
+        "methods": methods,
+        "ffpbs_unique": {
+            "sample_count": unique_rates["sample_count"],
+            "ivr": unique_rates["hvr"],
+            "ivr_bootstrap_95": unique_intervals["hvr"],
+        },
+        "agreement": {
+            "label_preserved_cohen_kappa": _cohen_kappa(label_pairs),
+            "semantic_preserved_cohen_kappa": _cohen_kappa(semantic_pairs),
+        },
         "bootstrap_samples": args.bootstrap_samples,
-        "semdt_semantic_improvement_pp": 100
-        * (
-            estimates["SemDT"]["semantic_preservation_rate"]
-            - estimates["Base"]["semantic_preservation_rate"]
-        ),
-        "semdt_valid_gsr_not_below_base": (
-            estimates["SemDT"]["valid_gsr"] >= estimates["Base"]["valid_gsr"]
-        ),
     }
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as handle:

@@ -1,0 +1,76 @@
+schema_version: 2
+experiment:
+  id: mrpc-albertbasev1-v2-ff-pareto-greedy
+  method: ff-pareto-greedy
+  seed: 765
+  output_root: outputs/dt4lm-improvements
+dataset:
+  id: mrpc
+  path: outputs/datasets/mrpc
+  revision: null
+  text_columns:
+  - sentence1
+  - sentence2
+  label_column: label
+  task_definition: Determine whether sentence1 and sentence2 are semantically equivalent
+    paraphrases.
+  evaluation:
+    split: test
+    sample_size: 1000
+    sample_seed: 765
+    manifest: outputs/dt4lm-improvements/sample_sets/mrpc/test-n1000-seed765.json
+models:
+  id: albertbasev1-v2
+  old:
+    name_or_path: outputs/finetuned/albertbasev1_mrpc/best_model
+    revision: null
+  new:
+    name_or_path: outputs/finetuned/albertbasev2_mrpc/best_model
+    revision: null
+attack:
+  recipe: kuleshov_var
+  differential_objective: dynamic
+  semantic_constraint: original
+  query_budget: 1000
+  search:
+    method: async_frontier
+    ranking: feasibility_pareto
+    beam_size: 1
+    infeasible_state_policy: fill
+    diagnostics:
+      trace_enabled: false
+semantic:
+  threshold:
+    source: none
+calibration:
+  enabled: false
+evaluation:
+  core:
+    success_budgets:
+    - 100
+    - 200
+    - 300
+    - 400
+    - 500
+    - 600
+    - 700
+    - 800
+    - 900
+    - 1000
+  quality:
+    bleu:
+      enabled: true
+    meteor:
+      enabled: true
+    rouge_l:
+      enabled: true
+    bertscore:
+      enabled: true
+      model_name_or_path: /mnt/huawei/nsq/models/microsoft/deberta-large-mnli
+      num_layers: 17
+      allow_remote_download: false
+      device: cuda
+      batch_size: 32
+      idf: false
+      rescale_with_baseline: false
+      baseline_path: null
