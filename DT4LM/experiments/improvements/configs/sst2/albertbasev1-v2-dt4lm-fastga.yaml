@@ -1,7 +1,7 @@
 schema_version: 2
 experiment:
-  id: sst2-gpt1-2-base
-  method: base
+  id: sst2-albertbasev1-v2-dt4lm-fastga
+  method: dt4lm-fastga
   seed: 765
   output_root: outputs/dt4lm-improvements
 dataset:
@@ -18,18 +18,31 @@ dataset:
     sample_seed: 765
     manifest: outputs/dt4lm-improvements/sample_sets/sst2/test-n1000-seed765.json
 models:
-  id: gpt1-2
+  id: albertbasev1-v2
   old:
-    name_or_path: outputs/finetuned/gpt1_sst2/best_model
+    name_or_path: outputs/finetuned/albertbasev1_sst2/best_model
     revision: null
   new:
-    name_or_path: outputs/finetuned/gpt2_sst2/best_model
+    name_or_path: outputs/finetuned/albertbasev2_sst2/best_model
     revision: null
 attack:
-  recipe: kuleshov_var
+  recipe: faster-alzantot
   differential_objective: dynamic
   semantic_constraint: original
   query_budget: 1000
+  recipe_parameters:
+    max_candidates: 8
+    max_percent: 0.2
+    max_mse_dist: 0.5
+    language_model_window_size: 6
+    max_log_prob_diff: 5.0
+    language_model_path: null
+    population_size: 60
+    max_iterations: 40
+    post_crossover_check: false
+  search:
+    method: recipe_native
+  model_batch_size: 32
 semantic:
   threshold:
     source: none

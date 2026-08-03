@@ -20,7 +20,16 @@ from .attack_recipe import AttackRecipe
 
 class LEAP2023(AttackRecipe):
     @staticmethod
-    def build(model_wrapper):
+    def build(
+        model_wrapper,
+        max_modification_rate=0.16,
+        population_size=60,
+        max_iterations=20,
+        post_turn_check=True,
+        max_turn_retries=20,
+    ):
+        """Build LEAP while preserving its published default configuration."""
+
         #
         # Swap words with their synonyms extracted based on the WordNet.
         #
@@ -28,7 +37,10 @@ class LEAP2023(AttackRecipe):
         #
         # MaxModificationRate = 0.16 in AG's News
         #
-        constraints = [MaxModificationRate(max_rate=0.16), StopwordModification()]
+        constraints = [
+            MaxModificationRate(max_rate=max_modification_rate),
+            StopwordModification(),
+        ]
         #
         #
         # Use untargeted classification for demo, can be switched to targeted one
@@ -37,6 +49,11 @@ class LEAP2023(AttackRecipe):
         #
         # Perform word substitution with LEAP algorithm.
         #
-        search_method = LEAP(pop_size=60,max_iters=20,post_turn_check=True,max_turn_retries=20)
+        search_method = LEAP(
+            pop_size=population_size,
+            max_iters=max_iterations,
+            post_turn_check=post_turn_check,
+            max_turn_retries=max_turn_retries,
+        )
 
         return Attack(goal_function, constraints, transformation, search_method)

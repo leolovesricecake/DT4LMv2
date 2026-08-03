@@ -152,6 +152,7 @@ class Attack:
         # Give search method access to functions for getting transformations and evaluating them
         self.search_method.get_transformations = self.get_transformations
         self._last_transformation_stats = {"generated": 0, "constraint_passed": 0}
+        self._recipe_diagnostics = self._empty_recipe_diagnostics()
         self.search_method.get_last_transformation_stats = (
             self.get_last_transformation_stats
         )
@@ -323,6 +324,13 @@ class Attack:
                 current_text, original_text, **kwargs
             )
 
+        # Count recipe-level proposals before semantic/fluency constraints so
+        # population searches and FF-PBS expose a comparable generation scale.
+        self._recipe_diagnostics["transformation_call_count"] += 1
+        self._recipe_diagnostics["generated_candidate_count"] += len(
+            transformed_texts
+        )
+
         filtered_texts = self.filter_transformations(
             transformed_texts, current_text, original_text
         )
@@ -387,6 +395,12 @@ class Attack:
         transformed_texts = [
             t for t in transformed_texts if t.text != current_text.text
         ]
+        # Search methods may call this directly for crossover or particle-turn
+        # candidates; counting here captures those proposals as well.
+        self._recipe_diagnostics["constraint_filter_call_count"] += 1
+        self._recipe_diagnostics["constraint_filter_input_count"] += len(
+            transformed_texts
+        )
         # Populate cache with transformed_texts
         uncached_texts = []
         filtered_texts = []
@@ -405,7 +419,22 @@ class Attack:
         )
         # Sort transformations to ensure order is preserved between runs
         filtered_texts.sort(key=lambda t: t.text)
+        self._recipe_diagnostics["constraint_passed_candidate_count"] += len(
+            filtered_texts
+        )
         return filtered_texts
+
+    @staticmethod
+    def _empty_recipe_diagnostics():
+        """Return zeroed counters shared by every native search recipe."""
+
+        return {
+            "transformation_call_count": 0,
+            "generated_candidate_count": 0,
+            "constraint_filter_call_count": 0,
+            "constraint_filter_input_count": 0,
+            "constraint_passed_candidate_count": 0,
+        }
 
     def _attack(self, initial_result):
         """Calls the ``SearchMethod`` to perturb the ``AttackedText`` stored in
@@ -418,7 +447,12 @@ class Attack:
             A ``SuccessfulAttackResult``, ``FailedAttackResult``,
                 or ``MaximizedAttackResult``.
         """
+        self._recipe_diagnostics = self._empty_recipe_diagnostics()
         final_result = self.search_method(initial_result)
+        final_result.recipe_diagnostics = {
+            "search_algorithm": self.search_method.__class__.__name__,
+            **self._recipe_diagnostics,
+        }
         self.clear_cache()
         if final_result.goal_status == GoalFunctionResultStatus.SUCCEEDED:
             result = SuccessfulAttackResult(

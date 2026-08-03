@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Analyze blinded Base/FF-PBS human judgments with bootstrap intervals."""
+"""Analyze blinded DT4LM-Kuleshov/FF-PBS judgments and intervals."""
 
 import argparse
 from collections import defaultdict
@@ -89,7 +89,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--reviews", required=True)
     parser.add_argument("--key", required=True)
-    parser.add_argument("--base-core", required=True)
+    parser.add_argument("--kuleshov-core", required=True)
     parser.add_argument("--ffpbs-core", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
@@ -138,10 +138,13 @@ def main():
 
     total = int(key["manifest_sample_count"])
     cores = {
-        "Base": _load_core(args.base_core, total),
+        "DT4LM-Kuleshov": _load_core(args.kuleshov_core, total),
         "FF-PBS": _load_core(args.ffpbs_core, total),
     }
-    method_cohorts = {"Base": "base_overall", "FF-PBS": "ffpbs_overall"}
+    method_cohorts = {
+        "DT4LM-Kuleshov": "kuleshov_overall",
+        "FF-PBS": "ffpbs_overall",
+    }
     rng = random.Random(args.seed)
     methods = {}
     for method, cohort in method_cohorts.items():

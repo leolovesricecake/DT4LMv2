@@ -30,8 +30,10 @@ IDENTITY_COLUMNS = [
     "new_revision",
     "new_model_training_seed",
     "recipe",
+    "recipe_parameters",
     "differential_objective",
     "search_method",
+    "search_algorithm",
     "frontier_ranking",
     "beam_size",
     "infeasible_state_policy",
@@ -76,6 +78,19 @@ CORE_COLUMNS = [
     "successful_queries_median",
     "successful_queries_q1",
     "successful_queries_q3",
+    "recipe_diagnostic_sample_count",
+    "transformation_call_total",
+    "transformation_call_mean",
+    "generated_candidate_total",
+    "generated_candidate_mean",
+    "constraint_filter_call_total",
+    "constraint_filter_call_mean",
+    "constraint_filter_input_total",
+    "constraint_filter_input_mean",
+    "constraint_passed_candidate_total",
+    "constraint_passed_candidate_mean",
+    "candidate_constraint_pass_rate",
+    "generated_candidates_per_model_pair_query",
     "search_diagnostic_sample_count",
     "search_expansions_mean",
     "search_max_depth_mean",
@@ -278,6 +293,19 @@ def _quality_fields(quality):
     return fields
 
 
+def _search_algorithm(attack):
+    """Name the concrete search implementation behind a config-level method."""
+
+    search = attack.get("search") or {"method": "legacy_greedy"}
+    if search["method"] == "async_frontier":
+        return "AsyncDifferentialBeamSearch"
+    return {
+        "kuleshov_var": "ComparatorGreedySearch",
+        "leap": "LEAP",
+        "faster-alzantot": "AlzantotGeneticAlgorithm",
+    }.get(attack["recipe"])
+
+
 def build_row(run_dir):
     """Validate and flatten one self-contained experiment run."""
 
@@ -308,8 +336,12 @@ def build_row(run_dir):
         "new_revision": _model_field(config, "new", "revision"),
         "new_model_training_seed": _model_field(config, "new", "training_seed"),
         "recipe": attack["recipe"],
+        "recipe_parameters": json.dumps(
+            attack.get("recipe_parameters") or {}, sort_keys=True
+        ),
         "differential_objective": attack["differential_objective"],
         "search_method": search["method"],
+        "search_algorithm": _search_algorithm(attack),
         "frontier_ranking": search.get("ranking"),
         "beam_size": search.get("beam_size"),
         "infeasible_state_policy": search.get("infeasible_state_policy"),

@@ -75,7 +75,7 @@ class LEAP(PopulationBasedSearch):
         self.max_iters = max_iters
         self.pop_size = pop_size
         self.post_turn_check = post_turn_check
-        self.max_turn_retries = 20
+        self.max_turn_retries = max_turn_retries
 
         self._search_over = False
         self.omega_max = 0.8

@@ -1,7 +1,8 @@
 # FF-PBS 实验完整指南
 
-本指南对应 `plan-260802-ffpbs.md`。当前论文主方法是 FF-PBS，活动实验不再包含
-SemDT、LexiDT、Static、AE-PBS 或自适应 epsilon 方法。
+本指南对应 `docs/plan-260803-ffpbs.md`。当前主方法是 FF-PBS，E1/E2 的
+系统级基线为 DT4LM-Kuleshov、DT4LM-LEAP 和 DT4LM-FastGA；E3-E5
+的机制消融统一固定 Kuleshov 的变换与约束。
 
 ## 1. 运行位置
 
@@ -11,11 +12,12 @@ SemDT、LexiDT、Static、AE-PBS 或自适应 epsilon 方法。
 cd DT4LM
 ```
 
-实验使用一份完整 YAML 配置，不做配置继承，也不用一条命令运行整个矩阵。
+每个 YAML 都是一份完整实验配置。配置之间不继承，每次只运行一份，
+因此可以先用一个数据集和模型对试跑。
 
 ## 2. 准备数据与模型
 
-首先使用 `datasets/preprocess_dataset.py` 生成本地 Hugging Face Dataset。例如：
+使用预处理脚本生成本地 Hugging Face Dataset：
 
 ```bash
 python datasets/preprocess_dataset.py sst2
@@ -24,14 +26,14 @@ python datasets/preprocess_dataset.py mrpc
 python datasets/preprocess_dataset.py mr
 ```
 
-默认输出在 `outputs/datasets/<dataset>/`。可以通过 `--output` 显式指定路径：
+默认输出为 `outputs/datasets/<dataset>/`。可显式设置路径：
 
 ```bash
 python datasets/preprocess_dataset.py sst2 \
   --output outputs/datasets/sst2
 ```
 
-新旧模型必须已经针对同一任务完成微调，并在配置中指定：
+新旧模型必须已在同一任务上完成微调，并在配置中写明：
 
 ```yaml
 models:
@@ -44,99 +46,152 @@ models:
     revision: null
 ```
 
-`models.id` 是稳定的 model-pair 身份，决定实验输出命名空间。
+`models.id` 是 model pair 的稳定身份，决定运行产物的命名空间。manifest
+只绑定 dataset/split/抽样结果，不绑定 model pair，因此同数据集的所有
+模型对故意共用同一 manifest。
 
 ## 3. 活动方法矩阵
 
-每个 dataset/model-pair 有六份主实验/消融配置：
+### 3.1 E1/E2 系统级比较
+
+| 方法 | Recipe | 原生搜索 | 作用 |
+| --- | --- | --- | --- |
+| DT4LM-Kuleshov | `kuleshov_var` | 宽度 1 贪心 | 与 FF-PBS 最严格的直接基线 |
+| DT4LM-LEAP | `leap` | LEAP 粒子群 | 现有通用多候选搜索 |
+| DT4LM-FastGA | `faster-alzantot` | Alzantot GA | 现有通用种群演化搜索 |
+| FF-PBS | `kuleshov_var` | 异步有界 frontier | 主方法，`K=5` |
+
+三个 DT4LM 基线都使用 dynamic 差分目标，但各自保留原 Recipe 的文本变换、
+约束和搜索状态机。LEAP/FastGA 与 FF-PBS 的比较是系统级比较，不能用于
+单独归因某一搜索组件。
+
+### 3.2 E3-E5 严格控制实验
 
 | 方法 | ranking | K | 不可行状态 |
 | --- | --- | ---: | --- |
-| Base | 原 DT4LM dynamic greedy | 1 | 由原目标间接处理 |
-| Dynamic-Beam | `dynamic` | 5 | 不特殊处理 |
+| Dynamic-Beam | `dynamic` | 5 | 由 dynamic 标量统一排序 |
 | FF-Pareto-Greedy | `feasibility_pareto` | 1 | `fill` |
 | Hard-PBS | `feasibility_pareto` | 5 | `discard` |
 | FF-MNew | `feasibility_mnew` | 5 | `fill` |
 | FF-PBS | `feasibility_pareto` | 5 | `fill` |
 
-`fill` 表示先保留旧模型预测正确的状态，只在 frontier 仍有空位时使用最小违反状态
-补位。`discard` 表示查询后永久删除旧模型预测错误的 post-root 状态。
+`ff-pbs-k3` 和 `ff-pbs-k10` 用于宽度敏感性分析。此类方法都使用相同
+Kuleshov 变换、约束、模型 batch size 和查询预算，才可以用于机制归因。
 
-FF-MNew 与 FF-PBS 使用相同的 `fill` 政策，但可行候选只按 `m_new` 降序排序，
-不使用修改率作为第二目标。
-
-## 4. 生成配置
-
-每个 model pair 只需先写好 `<model-pair>-base.yaml`，然后执行：
+## 4. 生成和检查配置
 
 ```bash
 python experiments/improvements/generate_ffpbs_configs.py
 ```
 
-生成器会：
+生成器会为每个 dataset/model-pair 生成 10 份完整配置：三个 DT4LM Recipe、
+五个主实验/消融及两个额外宽度。当前 4 个数据集、2 个 model pair 共
+80 份活动配置。旧 `<model-pair>-base.yaml` 会一次性迁移为
+`<model-pair>-dt4lm-kuleshov.yaml`。
 
-1. 扫描 `experiments/improvements/configs/*/*-base.yaml`；
-2. 为每个 Base 生成五个核心搜索对照和两个额外宽度配置；
-3. 统一设置 `Success@100,200,...,1000`；
-4. 检查文件名与 `models.id` 是否一致。
+每份配置都显式写入：
 
-另外生成 `ff-pbs-k3` 和 `ff-pbs-k10`，与可复用为 `K=1` 的
-FF-Pareto-Greedy 及主方法 `K=5` 共同覆盖参数敏感性实验。
+- `attack.recipe` 与 `attack.recipe_parameters`；
+- `attack.search`；
+- `attack.query_budget: 1000`；
+- `attack.model_batch_size: 32`；
+- `Success@100,200,...,1000`。
 
-当前四个数据集、ALBERT/GPT 两类 model pair 共有 64 份活动配置。新增 DeBERTa
-model pair 时，添加对应 Base 配置后重新运行生成器即可。
+### 4.1 Kuleshov GPT-2 路径
+
+正式配置默认使用：
+
+```yaml
+fluency_model_name_or_path: /mnt/huawei/nsq/models/openai-community/gpt2
+```
+
+这是 Kuleshov 的流畅性约束模型，与正在测试的 ALBERT/GPT 新旧模型无关。运行前检查：
+
+```bash
+test -d /mnt/huawei/nsq/models/openai-community/gpt2
+```
+
+若实际路径不同，修改所有待运行 YAML 中的该字段。使用本地路径可避免
+在实验启动时访问 `gpt2` 远程仓库。
+
+### 4.2 LEAP WordNet
+
+LEAP 使用 WordNet 同义词替换。离线运行前先下载 NLTK 资源：
+
+```bash
+python -m nltk.downloader wordnet omw-1.4
+```
+
+### 4.3 FastGA Learning-to-Write 模型
+
+FastGA 的 `language_model_path: null` 表示使用 TextAttack 标准缓存；首次缺失时会
+尝试下载。可先单独准备并查看返回路径：
+
+```bash
+python - <<'PY'
+from textattack.shared.utils import download_from_s3
+
+print(download_from_s3(
+    "constraints/grammaticality/language-models/learning-to-write"
+))
+PY
+```
+
+严格离线环境中，将已准备的模型目录写到 FastGA YAML 的
+`attack.recipe_parameters.language_model_path`。配置了路径但目录不存在时，
+运行器会在加载新旧模型前报错。
 
 ## 5. 准备固定 manifest
 
-同一 dataset 的所有 model pair 和方法使用同一份 test manifest：
+同数据集的任意活动配置都可用来准备 manifest：
 
 ```bash
 bash experiments/improvements/prepare_manifests.sh \
-  experiments/improvements/configs/sst2/albertbasev1-v2-base.yaml
+  experiments/improvements/configs/sst2/albertbasev1-v2-dt4lm-kuleshov.yaml
 ```
 
 `dataset.evaluation.sample_size` 的规则是：
 
 - 缺省、`null` 或非正数：使用全部 test 样本；
 - 正整数：按 `sample_seed` 随机抽取至多该数量；
-- 测试集不足 1000 条时：使用全部样本。
+- 测试集小于指定数量：使用全部样本。
 
-manifest 只绑定 dataset/split/抽样结果，不绑定 model pair。
+## 6. 逐个运行实验
 
-## 6. 运行单个实验
-
-每次只运行一份完整配置：
+先在一个设置上依次运行 E1/E2 的四个方法：
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/sst2/albertbasev1-v2-base.yaml
+  experiments/improvements/configs/sst2/albertbasev1-v2-dt4lm-kuleshov.yaml
+
+CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
+  experiments/improvements/configs/sst2/albertbasev1-v2-dt4lm-leap.yaml
+
+CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
+  experiments/improvements/configs/sst2/albertbasev1-v2-dt4lm-fastga.yaml
 
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-ff-pbs.yaml
 ```
 
-组件消融可独立运行：
+机制消融可独立运行：
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-dynamic-beam.yaml
-
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-ff-pareto-greedy.yaml
-
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-hard-pbs.yaml
-
 CUDA_VISIBLE_DEVICES=1 bash experiments/improvements/run_first_round.sh \
   experiments/improvements/configs/sst2/albertbasev1-v2-ff-mnew.yaml
 ```
 
-本轮 schema 与历史结果不兼容。重跑前应先将旧的 `outputs/dt4lm-improvements/runs/` 整体移出
-或删除，避免 Base/Dynamic-Beam 的旧目录被断点逻辑识别。
+方法名和产物协议已变更。正式重跑前，将历史
+`outputs/dt4lm-improvements/runs/` 整体移出或删除，避免断点逻辑拒绝在
+同一 experiment id 下混用不同攻击配置。
 
 ## 7. 产物协议
-
-完整 run 目录为：
 
 ```text
 outputs/dt4lm-improvements/runs/<dataset>/<model_pair>/<experiment_id>/
@@ -152,69 +207,54 @@ outputs/dt4lm-improvements/runs/<dataset>/<model_pair>/<experiment_id>/
     quality.json
 ```
 
-`results.jsonl` 使用 schema v4，每个 manifest 样本恰好一行。`result_status` 只能是：
+`results.jsonl` 每个 manifest 样本恰好一行，`result_status` 只能是
+`successful`、`failed` 或 `skipped`。每个非 skipped 样本记录：
 
-- `successful`；
-- `failed`；
-- `skipped`。
+- `model_pair_queries` 和 `queries_to_success`；
+- wall-clock 与 peak VRAM；
+- `recipe_diagnostics`：所有 Recipe 共用的候选规模统计；
+- `search_diagnostics`：FF-PBS 异步 frontier 的专用机制统计。
 
-`query_data.json` 使用等长列式数据，完整保存：
-
-- `dataset_index`；
-- `result_status`；
-- `model_pair_queries`；
-- `queries_to_success`；
-- `budget_penalized_queries`。
-
-该文件可以直接支持 Success-Query 曲线、QPS 和 BPQC 重算，当前阶段不强制画图。
+`query_data.json` 以等长列式数据保存每个样本的状态、查询数、成功查询点
+和预算惩罚查询数，可在后续直接绘制 Success-Query curve。
 
 ## 8. 自动计算的指标
 
 `metrics/core.json` 包含：
 
-### 有效性与效率
+- GSR、SGR、successful/failed/skipped；
+- QPS、总模型对查询数、Success@B、Success-Query AUC；
+- BPQC、normalized BPQC、AMR；
+- 端到端时间、每成功耗时、峰值显存；
+- BLEU、METEOR、ROUGE-L 和 BERTScore 单独保存在 `quality.json`。
 
-- `paper_gsr = successful / attackable`；
-- `sample_generation_rate = successful / total`；
-- `model_pair_qps = 全部样本模型对查询总数 / successful`；
-- `success_at_100` 至 `success_at_1000`；
-- `success_query_auc`；
-- `bpqc` 和 `normalized_bpqc`；
-- `amr`。
+所有 Recipe 共用的候选规模指标包括：
 
-### FF-PBS 机制
+- `transformation_call_total/mean`；
+- `generated_candidate_total/mean`；
+- `constraint_filter_call_total/mean`；
+- `constraint_filter_input_total/mean`；
+- `constraint_passed_candidate_total/mean`；
+- `candidate_constraint_pass_rate`；
+- `generated_candidates_per_model_pair_query`。
 
-- `non_top1_path_rate`；
-- `post_root_old_prediction_error_path_rate`；
-- `recover_first_infeasible_depth_mean/median`；
-- `recover_first_recovery_depth_mean/median`；
-- `recover_depth_span_mean/median`；
-- `infeasible_fill_event_rate`；
-- `infeasible_retained_state_rate`；
-- `hard_discard_rate`；
-- `frontier_size_mean`、`rank1_size_mean`；
-- `frontier_modified_set_diversity_mean`；
-- `frontier_depth_diversity_mean`；
-- `success_path_depth_mean/median`。
+`generated_candidate_*` 计数的是 transformation 产生、约束过滤前的原始候选；
+GA crossover 等直接送入模型的状态体现在模型对查询数中。因此候选规模是
+辅助的系统成本指标，不取代查询数。
 
-每个成功样本还会在 `results.jsonl` 的 `search_diagnostics.successful_path` 中保存紧凑列式
-根到终点路径，供恢复深度分析和论文路径案例使用。
+FF-PBS 专用机制指标还包括 non-top1 路径率、暂时不可行路径率、恢复深度、
+frontier 大小/多样性、不可行补位率、Hard-PBS 丢弃率和 Pareto 排序时间。
 
-修改位置和深度多样性均是对每次 frontier 的 `unique_count / frontier_size` 先归一化，再在
-所有 frontier 更新上取平均。
+## 9. 断点恢复与指标重算
 
-### 资源
+重复执行同一配置时：
 
-`core.json.resources` 包含：
+- 完整 `results.jsonl` 存在且与 manifest/攻击身份一致：跳过攻击；
+- core 完整：跳过 core；
+- quality 不完整或失败：只重跑 quality。
 
-- `end_to_end_seconds`；
-- `peak_vram_bytes`；
-- `frontier_sort_seconds`；
-- `frontier_sort_time_ratio`。
-
-## 9. 重算指标
-
-攻击已完成但 metrics 失败时，不需重跑攻击：
+攻击已完成但 metrics 失败时，可删除该 run 的 `metrics/` 后直接重新执行
+原配置，也可批量重算：
 
 ```bash
 python statistics/recompute_metrics.py \
@@ -222,14 +262,9 @@ python statistics/recompute_metrics.py \
   --stage all
 ```
 
-`core` 和 `quality` 可以分开重算：
+`--stage core` 和 `--stage quality` 可分别重算。
 
-```bash
-python statistics/recompute_metrics.py --stage core
-python statistics/recompute_metrics.py --stage quality
-```
-
-## 10. 生成总表
+## 10. 生成论文总表
 
 ```bash
 python statistics/aggregate_improvements.py \
@@ -237,70 +272,51 @@ python statistics/aggregate_improvements.py \
   --o summary.csv
 ```
 
-输出文件位于：
-
-```text
-outputs/dt4lm-improvements/runs/summary.csv
-```
-
-汇总器只接受 schema-v4 结果，不会尝试重命名或兼容历史方法。
+输出位于 `outputs/dt4lm-improvements/runs/summary.csv`。除全部论文指标外，总表还包含
+dataset、model pair、method、seed、recipe、序列化 recipe 参数、实际搜索算法、
+manifest 指纹和运行环境时间戳。
 
 ## 11. 配对比较
 
-Base 与 FF-PBS：
+DT4LM-Kuleshov 与 FF-PBS：
 
 ```bash
 python statistics/compare_search_methods.py \
-  --baseline outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/sst2-albertbasev1-v2-base \
+  --baseline outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/sst2-albertbasev1-v2-dt4lm-kuleshov \
   --candidate outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/sst2-albertbasev1-v2-ff-pbs \
-  --o outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/ffpbs-vs-base.json
+  --o outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/ffpbs-vs-kuleshov.json
 ```
 
-Hard-PBS 与 FF-PBS：
-
-```bash
-python statistics/compare_search_methods.py \
-  --baseline outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/sst2-albertbasev1-v2-hard-pbs \
-  --candidate outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/sst2-albertbasev1-v2-ff-pbs \
-  --o outputs/dt4lm-improvements/runs/sst2/albertbasev1-v2/ffpbs-vs-hard.json
-```
-
-输出包含 McNemar、配对 bootstrap、Wilcoxon、BPQC 差、百分点 GSR 差以及 FF-PBS 独有成功的：
-
-- `non_top1_rate`；
-- `unique_post_root_old_prediction_error_path_rate`。
+Hard-PBS 与 FF-PBS 仍可用同一脚本进行机制对照。配对输出包含成功列联表、
+McNemar、bootstrap、Wilcoxon、GSR/BPQC 差异及 FF-PBS 独有成功的路径机制统计。
 
 ## 12. 人工评价
 
-在一个单句任务和一个句子对任务上分别执行。生成盲评样本：
+人工评价只比较 DT4LM-Kuleshov 与 FF-PBS，不扩展到 LEAP/FastGA。在一个
+单句任务和一个句子对任务上分别生成盲评样本：
 
 ```bash
 python statistics/sample_human_evaluation.py \
-  --base-results <base-run>/results.jsonl \
+  --kuleshov-results <kuleshov-run>/results.jsonl \
   --ffpbs-results <ffpbs-run>/results.jsonl \
-  --manifest <base-run>/sample_manifest.json \
+  --manifest <kuleshov-run>/sample_manifest.json \
   --output human/reviews.jsonl \
   --key-output human/key.json \
   --method-sample-size 100 \
   --unique-sample-size 50
 ```
 
-每个 review 由两名评审者分别填写：
-
-- `reviewer_1_label_preserved` 和 `reviewer_2_label_preserved`；
-- `reviewer_1_semantic_preserved` 和 `reviewer_2_semantic_preserved`。
-
-两名评审独立标注，不一致时在 `final_label_preserved` 或
-`final_semantic_preserved` 填写裁决值；一致时可保持 `null`。完成后分析：
+每个 review 由两名评审者独立填写标签保持和语义保持判断，不一致时再填写
+`final_label_preserved` 或 `final_semantic_preserved`。完成后执行：
 
 ```bash
 python statistics/analyze_human_evaluation.py \
   --reviews human/reviews.jsonl \
   --key human/key.json \
-  --base-core <base-run>/metrics/core.json \
+  --kuleshov-core <kuleshov-run>/metrics/core.json \
   --ffpbs-core <ffpbs-run>/metrics/core.json \
   --output human/analysis.json
 ```
 
-结果包含 Base/FF-PBS 的 LPR、SPR、HVR、ValidGSR，FF-PBS 独有成功的 IVR，以及两个
-判断维度各自的 Cohen's kappa 和 bootstrap 95% 置信区间。
+结果包含两种方法的 LPR、SPR、HVR、ValidGSR，FF-PBS 独有成功的 IVR，
+两个判断维度的 Cohen's kappa 与 bootstrap 95% 置信区间。

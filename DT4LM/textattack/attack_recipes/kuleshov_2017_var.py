@@ -29,7 +29,16 @@ class Kuleshov2017Var(AttackRecipe):
     """
 
     @staticmethod
-    def build(model_wrapper):
+    def build(
+        model_wrapper,
+        max_candidates=15,
+        max_percent=0.5,
+        thought_vector_threshold=0.2,
+        max_log_prob_diff=2.0,
+        fluency_model_name_or_path="gpt2",
+    ):
+        """Build Kuleshov with explicit reproducibility-critical parameters."""
+
         #
         # "Specifically, in all experiments, we used a target of τ = 0.7,
         # a neighborhood size of N = 15, and parameters λ_1 = 0.2 and δ = 0.5; we set
@@ -38,7 +47,7 @@ class Kuleshov2017Var(AttackRecipe):
         #
         # Word swap with top-15 counter-fitted embedding neighbors.
         #
-        transformation = WordSwapEmbedding(max_candidates=15)
+        transformation = WordSwapEmbedding(max_candidates=max_candidates)
         #
         # Don't modify the same word twice or stopwords
         #
@@ -46,16 +55,25 @@ class Kuleshov2017Var(AttackRecipe):
         #
         # Maximum of 50% of words perturbed (δ in the paper).
         #
-        constraints.append(MaxWordsPerturbed(max_percent=0.5))
+        constraints.append(MaxWordsPerturbed(max_percent=max_percent))
         #
         # Maximum thought vector Euclidean distance of λ_1 = 0.2. (eq. 4)
         #
-        constraints.append(ThoughtVector(threshold=0.2, metric="max_euclidean"))
+        constraints.append(
+            ThoughtVector(
+                threshold=thought_vector_threshold, metric="max_euclidean"
+            )
+        )
         #
         #
         # Maximum language model log-probability difference of λ_2 = 2. (eq. 5)
         #
-        constraints.append(GPT2(max_log_prob_diff=2.0))
+        constraints.append(
+            GPT2(
+                model_name=fluency_model_name_or_path,
+                max_log_prob_diff=max_log_prob_diff,
+            )
+        )
         #
         # Goal is untargeted classification: reduce original probability score
         # to below τ = 0.7 (Algorithm 1).

@@ -535,6 +535,7 @@ class _CommandLineAttackArgs:
     constraint_cache_size: int = 2**18
     filter_test_by_labels: list = None
     base_recipe: str = "leap"
+    base_recipe_parameters: dict = field(default_factory=dict)
     lambda1: float = 0
     lambda2: float = 0
     differential_objective: str = "dynamic"
@@ -661,6 +662,12 @@ class _CommandLineAttackArgs:
             help='The attack method to base on during model pair attack.',
         )
         parser.add_argument(
+            "--base-recipe-parameters",
+            type=json.loads,
+            default=default_obj.base_recipe_parameters,
+            help="JSON object containing the selected base recipe parameters.",
+        )
+        parser.add_argument(
             "--lambda1",
             type=float,
             required=False,
@@ -682,7 +689,7 @@ class _CommandLineAttackArgs:
         )
         parser.add_argument(
             "--differential-search",
-            choices=("legacy_greedy", "async_frontier"),
+            choices=("recipe_native", "legacy_greedy", "async_frontier"),
             default=default_obj.differential_search,
             help="PAIR search controller; legacy_greedy preserves existing behavior.",
         )

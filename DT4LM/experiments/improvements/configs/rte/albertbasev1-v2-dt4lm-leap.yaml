@@ -1,0 +1,77 @@
+schema_version: 2
+experiment:
+  id: rte-albertbasev1-v2-dt4lm-leap
+  method: dt4lm-leap
+  seed: 765
+  output_root: outputs/dt4lm-improvements
+dataset:
+  id: rte
+  path: outputs/datasets/rte
+  revision: null
+  text_columns:
+  - premise
+  - hypothesis
+  label_column: label
+  task_definition: Determine whether the premise entails the hypothesis.
+  evaluation:
+    split: test
+    sample_size: 1000
+    sample_seed: 765
+    manifest: outputs/dt4lm-improvements/sample_sets/rte/test-n1000-seed765.json
+models:
+  id: albertbasev1-v2
+  old:
+    name_or_path: outputs/finetuned/albertbasev1_rte/best_model
+    revision: null
+  new:
+    name_or_path: outputs/finetuned/albertbasev2_rte/best_model
+    revision: null
+attack:
+  recipe: leap
+  differential_objective: dynamic
+  semantic_constraint: original
+  query_budget: 1000
+  recipe_parameters:
+    max_modification_rate: 0.16
+    population_size: 60
+    max_iterations: 20
+    post_turn_check: true
+    max_turn_retries: 20
+  search:
+    method: recipe_native
+  model_batch_size: 32
+semantic:
+  threshold:
+    source: none
+calibration:
+  enabled: false
+evaluation:
+  core:
+    success_budgets:
+    - 100
+    - 200
+    - 300
+    - 400
+    - 500
+    - 600
+    - 700
+    - 800
+    - 900
+    - 1000
+  quality:
+    bleu:
+      enabled: true
+    meteor:
+      enabled: true
+    rouge_l:
+      enabled: true
+    bertscore:
+      enabled: true
+      model_name_or_path: /mnt/huawei/nsq/models/microsoft/deberta-large-mnli
+      num_layers: 17
+      allow_remote_download: false
+      device: cuda
+      batch_size: 32
+      idf: false
+      rescale_with_baseline: false
+      baseline_path: null

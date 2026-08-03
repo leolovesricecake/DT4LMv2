@@ -300,6 +300,40 @@ def _search_diagnostic_metrics(records, statuses):
     }
 
 
+def _recipe_diagnostic_metrics(records, statuses):
+    """Aggregate candidate-generation counters available for every recipe."""
+
+    diagnostics = [
+        row.get("recipe_diagnostics")
+        for row, status in zip(records, statuses)
+        if status != "skipped" and isinstance(row.get("recipe_diagnostics"), dict)
+    ]
+    fields = (
+        "transformation_call_count",
+        "generated_candidate_count",
+        "constraint_filter_call_count",
+        "constraint_filter_input_count",
+        "constraint_passed_candidate_count",
+    )
+    totals = {
+        field: sum(int(item.get(field) or 0) for item in diagnostics)
+        for field in fields
+    }
+    sample_count = len(diagnostics)
+    result = {"recipe_diagnostic_sample_count": sample_count}
+    for field, total in totals.items():
+        stem = field.removesuffix("_count")
+        result[f"{stem}_total"] = total
+        result[f"{stem}_mean"] = total / sample_count if sample_count else None
+    filter_inputs = totals["constraint_filter_input_count"]
+    result["candidate_constraint_pass_rate"] = (
+        totals["constraint_passed_candidate_count"] / filter_inputs
+        if filter_inputs
+        else None
+    )
+    return result
+
+
 def core_metrics(records, manifest, *, success_budgets, query_budget):
     """Compute paper metrics and complete columnar per-sample query data."""
 
@@ -454,6 +488,11 @@ def core_metrics(records, manifest, *, success_budgets, query_budget):
         ),
     }
     result.update(_search_diagnostic_metrics(records, statuses))
+    result.update(_recipe_diagnostic_metrics(records, statuses))
+    generated_total = result["generated_candidate_total"]
+    result["generated_candidates_per_model_pair_query"] = (
+        generated_total / total_queries if total_queries else None
+    )
     for budget in success_budgets:
         numerator = sum(value <= budget for value in success_queries)
         result[f"success_at_{budget}"] = (

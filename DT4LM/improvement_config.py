@@ -10,11 +10,44 @@ SCHEMA_VERSION = 2
 OBJECTIVES = frozenset(("dynamic", "static", "lexi"))
 SEMANTIC_CONSTRAINTS = frozenset(("original", "nli"))
 THRESHOLD_SOURCES = frozenset(("none", "manual", "calibrated"))
-SEARCH_METHODS = frozenset(("legacy_greedy", "async_frontier"))
+SEARCH_METHODS = frozenset(("recipe_native", "legacy_greedy", "async_frontier"))
 FRONTIER_RANKINGS = frozenset(
     ("dynamic", "feasibility_pareto", "feasibility_mnew")
 )
 INFEASIBLE_STATE_POLICIES = frozenset(("fill", "discard"))
+RECIPE_PARAMETER_KEYS = {
+    "kuleshov_var": frozenset(
+        (
+            "max_candidates",
+            "max_percent",
+            "thought_vector_threshold",
+            "max_log_prob_diff",
+            "fluency_model_name_or_path",
+        )
+    ),
+    "leap": frozenset(
+        (
+            "max_modification_rate",
+            "population_size",
+            "max_iterations",
+            "post_turn_check",
+            "max_turn_retries",
+        )
+    ),
+    "faster-alzantot": frozenset(
+        (
+            "max_candidates",
+            "max_percent",
+            "max_mse_dist",
+            "language_model_window_size",
+            "max_log_prob_diff",
+            "language_model_path",
+            "population_size",
+            "max_iterations",
+            "post_crossover_check",
+        )
+    ),
+}
 
 
 def _require(mapping: Mapping[str, Any], key: str, context: str) -> Any:
@@ -43,6 +76,72 @@ def model_spec(config: Mapping[str, Any], role: str) -> Mapping[str, Any]:
         raise ValueError(f"models.{role} must be a mapping.")
     _require(value, "name_or_path", f"models.{role}")
     return value
+
+
+def _validate_recipe_parameters(recipe: str, parameters: Any) -> None:
+    """Validate paper-facing parameters for the three formal DT4LM recipes."""
+
+    expected = RECIPE_PARAMETER_KEYS.get(recipe)
+    if expected is None:
+        if parameters not in (None, {}):
+            raise ValueError(f"attack.recipe_parameters are unsupported for {recipe!r}.")
+        return
+    if not isinstance(parameters, dict) or set(parameters) != expected:
+        raise ValueError(
+            f"attack.recipe_parameters for {recipe!r} must contain exactly "
+            f"{sorted(expected)!r}."
+        )
+
+    integer_fields = {
+        "max_candidates",
+        "population_size",
+        "max_iterations",
+        "max_turn_retries",
+        "language_model_window_size",
+    }
+    for name in integer_fields & expected:
+        value = parameters[name]
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"attack.recipe_parameters.{name} must be positive.")
+    for name in (
+        "max_percent",
+        "thought_vector_threshold",
+        "max_log_prob_diff",
+        "max_modification_rate",
+        "max_mse_dist",
+    ):
+        if name in expected:
+            value = parameters[name]
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or value <= 0
+            ):
+                raise ValueError(
+                    f"attack.recipe_parameters.{name} must be positive."
+                )
+    for name in ("max_percent", "max_modification_rate"):
+        if name in expected and parameters[name] > 1:
+            raise ValueError(f"attack.recipe_parameters.{name} cannot exceed one.")
+    for name in ("post_turn_check", "post_crossover_check"):
+        if name in expected and not isinstance(parameters[name], bool):
+            raise ValueError(f"attack.recipe_parameters.{name} must be boolean.")
+    fluency_path = parameters.get("fluency_model_name_or_path")
+    if "fluency_model_name_or_path" in expected and (
+        not isinstance(fluency_path, str) or not fluency_path.strip()
+    ):
+        raise ValueError(
+            "attack.recipe_parameters.fluency_model_name_or_path must be a "
+            "non-empty path or model ID."
+        )
+    language_model_path = parameters.get("language_model_path")
+    if language_model_path is not None and (
+        not isinstance(language_model_path, str) or not language_model_path.strip()
+    ):
+        raise ValueError(
+            "attack.recipe_parameters.language_model_path must be null or a "
+            "non-empty path."
+        )
 
 
 def validate_experiment_config(config: Mapping[str, Any]) -> None:
@@ -112,6 +211,7 @@ def validate_experiment_config(config: Mapping[str, Any]) -> None:
         "differential_objective",
         "semantic_constraint",
         "query_budget",
+        "model_batch_size",
     ):
         _require(attack, key, "attack")
     if attack["differential_objective"] not in OBJECTIVES:
@@ -126,6 +226,15 @@ def validate_experiment_config(config: Mapping[str, Any]) -> None:
         )
     if not isinstance(attack["query_budget"], int) or attack["query_budget"] <= 0:
         raise ValueError("attack.query_budget must be a positive integer.")
+    if (
+        not isinstance(attack["model_batch_size"], int)
+        or isinstance(attack["model_batch_size"], bool)
+        or attack["model_batch_size"] <= 0
+    ):
+        raise ValueError("attack.model_batch_size must be a positive integer.")
+    _validate_recipe_parameters(
+        str(attack["recipe"]), attack.get("recipe_parameters")
+    )
 
     search = attack.get("search")
     if search is not None:
@@ -136,9 +245,11 @@ def validate_experiment_config(config: Mapping[str, Any]) -> None:
             raise ValueError(
                 f"attack.search.method must be one of {sorted(SEARCH_METHODS)!r}."
             )
-        if method == "legacy_greedy" and set(search) != {"method"}:
+        if method in {"recipe_native", "legacy_greedy"} and set(search) != {
+            "method"
+        }:
             raise ValueError(
-                "legacy_greedy attack.search accepts only the method field."
+                "Native attack.search accepts only the method field."
             )
         if method == "async_frontier":
             allowed_search_fields = {

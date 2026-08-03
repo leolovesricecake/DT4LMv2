@@ -33,7 +33,20 @@ class FasterGeneticAlgorithmJia2019(AttackRecipe):
     """
 
     @staticmethod
-    def build(model_wrapper):
+    def build(
+        model_wrapper,
+        max_candidates=8,
+        max_percent=0.2,
+        max_mse_dist=0.5,
+        language_model_window_size=6,
+        max_log_prob_diff=5.0,
+        language_model_path=None,
+        population_size=60,
+        max_iterations=40,
+        post_crossover_check=False,
+    ):
+        """Build FastGA with explicit search and auxiliary-model parameters."""
+
         #
         # Section 5: Experiments
         #
@@ -102,7 +115,7 @@ class FasterGeneticAlgorithmJia2019(AttackRecipe):
         #
         # "[We] fix the hyperparameter values to S = 60, N = 8, K = 4, and δ = 0.5"
         #
-        transformation = WordSwapEmbedding(max_candidates=8)
+        transformation = WordSwapEmbedding(max_candidates=max_candidates)
         #
         # Don't modify the same word twice or stopwords
         #
@@ -110,11 +123,11 @@ class FasterGeneticAlgorithmJia2019(AttackRecipe):
         #
         # Maximum words perturbed percentage of 20%
         #
-        constraints.append(MaxWordsPerturbed(max_percent=0.2))
+        constraints.append(MaxWordsPerturbed(max_percent=max_percent))
         #
         # Maximum word embedding euclidean distance of 0.5.
         #
-        constraints.append(WordEmbeddingDistance(max_mse_dist=0.5))
+        constraints.append(WordEmbeddingDistance(max_mse_dist=max_mse_dist))
         #
         # Language Model
         #
@@ -122,7 +135,10 @@ class FasterGeneticAlgorithmJia2019(AttackRecipe):
         #
         constraints.append(
             LearningToWriteLanguageModel(
-                window_size=6, max_log_prob_diff=5.0, compare_against_original=True
+                window_size=language_model_window_size,
+                max_log_prob_diff=max_log_prob_diff,
+                compare_against_original=True,
+                model_path=language_model_path,
             )
         )
         # constraints.append(LearningToWriteLanguageModel(window_size=5))
@@ -134,7 +150,9 @@ class FasterGeneticAlgorithmJia2019(AttackRecipe):
         # Perform word substitution with a genetic algorithm.
         #
         search_method = AlzantotGeneticAlgorithm(
-            pop_size=60, max_iters=40, post_crossover_check=False
+            pop_size=population_size,
+            max_iters=max_iterations,
+            post_crossover_check=post_crossover_check,
         )
 
         return Attack(goal_function, constraints, transformation, search_method)

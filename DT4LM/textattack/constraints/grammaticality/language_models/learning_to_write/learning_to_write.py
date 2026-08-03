@@ -33,10 +33,16 @@ class LearningToWriteLanguageModel(LanguageModelConstraint):
 
     CACHE_PATH = "constraints/grammaticality/language-models/learning-to-write"
 
-    def __init__(self, window_size=5, **kwargs):
+    def __init__(self, window_size=5, model_path=None, **kwargs):
+        """Load the standard cached model or an explicitly prepared directory."""
+
         self.window_size = window_size
-        lm_folder_path = textattack.shared.utils.download_from_s3(
-            LearningToWriteLanguageModel.CACHE_PATH
+        lm_folder_path = (
+            model_path
+            if model_path
+            else textattack.shared.utils.download_from_s3(
+                LearningToWriteLanguageModel.CACHE_PATH
+            )
         )
         self.query_handler = QueryHandler.load_model(
             lm_folder_path, textattack.shared.utils.device

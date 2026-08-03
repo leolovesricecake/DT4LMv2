@@ -553,8 +553,12 @@ def test_manifest_preparation_uses_configured_hyperparameter():
 
 def test_experiment_configs_define_independent_runtime_axes():
     config_root = ROOT / "experiments/improvements/configs"
-    expected = {
-        "base": None,
+    system_recipes = {
+        "dt4lm-kuleshov": "kuleshov_var",
+        "dt4lm-leap": "leap",
+        "dt4lm-fastga": "faster-alzantot",
+    }
+    controlled = {
         "dynamic-beam": ("dynamic", 5, None),
         "ff-pareto-greedy": ("feasibility_pareto", 1, "fill"),
         "hard-pbs": ("feasibility_pareto", 5, "discard"),
@@ -563,29 +567,33 @@ def test_experiment_configs_define_independent_runtime_axes():
     }
     for dataset_id in ("sst2", "rte", "mrpc", "mr"):
         for model_pair in ("albertbasev1-v2", "gpt1-2"):
-            for name, axes in expected.items():
+            for name, recipe in system_recipes.items():
+                config = experiment_runner.load_experiment_config(
+                    config_root / dataset_id / f"{model_pair}-{name}.yaml"
+                )
+                assert config["attack"]["recipe"] == recipe
+                assert config["attack"]["search"] == {"method": "recipe_native"}
+                assert config["attack"]["recipe_parameters"]
+            for name, axes in controlled.items():
                 config = experiment_runner.load_experiment_config(
                     config_root / dataset_id / f"{model_pair}-{name}.yaml"
                 )
                 assert config["attack"]["differential_objective"] == "dynamic"
                 assert config["attack"]["semantic_constraint"] == "original"
                 assert config["semantic"]["threshold"]["source"] == "none"
-                search = config["attack"].get("search")
-                if axes is None:
-                    assert search is None
-                else:
-                    assert (
-                        search["ranking"],
-                        search["beam_size"],
-                        search.get("infeasible_state_policy"),
-                    ) == axes
+                search = config["attack"]["search"]
+                assert (
+                    search["ranking"],
+                    search["beam_size"],
+                    search.get("infeasible_state_policy"),
+                ) == axes
 
 
 def test_dataset_configs_expose_sampling_and_task_schemas():
     config_dir = ROOT / "experiments/improvements/configs"
     configs = {
         dataset_id: experiment_runner.load_experiment_config(
-            config_dir / dataset_id / "albertbasev1-v2-base.yaml"
+            config_dir / dataset_id / "albertbasev1-v2-dt4lm-kuleshov.yaml"
         )
         for dataset_id in ("sst2", "rte", "mrpc", "mr")
     }
@@ -1307,14 +1315,18 @@ def test_human_sampling_and_joint_validity_rates():
             "ground_truth_output": 0,
         }
 
-    base = {0: row(0, "successful"), 1: row(1, "successful"), 2: row(2, "failed")}
+    kuleshov = {
+        0: row(0, "successful"),
+        1: row(1, "successful"),
+        2: row(2, "failed"),
+    }
     ff = {0: row(0, "failed"), 1: row(1, "successful"), 2: row(2, "successful")}
     reviews, key = human_sample.build_sample(
-        base, ff, method_sample_size=2, unique_sample_size=1, seed=7
+        kuleshov, ff, method_sample_size=2, unique_sample_size=1, seed=7
     )
     assert len(reviews) == 4
     assert key["population_counts"] == {
-        "base_overall": 2,
+        "kuleshov_overall": 2,
         "ffpbs_overall": 2,
         "ffpbs_unique": 1,
     }

@@ -105,6 +105,9 @@ class JSONLLogger(Logger):
             "search_diagnostics": getattr(
                 perturbed, "search_diagnostics", None
             ),
+            "recipe_diagnostics": getattr(
+                perturbed, "recipe_diagnostics", None
+            ),
         }
         self._rows.append(row)
         self._flushed = False

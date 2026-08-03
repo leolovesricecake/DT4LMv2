@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Create reproducible blinded Base/FF-PBS human-evaluation samples."""
+"""Create blinded DT4LM-Kuleshov/FF-PBS human-evaluation samples."""
 
 import argparse
 import json
@@ -45,7 +45,7 @@ def _success_indices(indexed):
 
 
 def build_sample(
-    base,
+    kuleshov,
     ffpbs,
     *,
     method_sample_size=100,
@@ -54,18 +54,22 @@ def build_sample(
 ):
     """Build blinded review rows and a separate method/cohort key."""
 
-    if set(base) != set(ffpbs):
-        raise ValueError("Base and FF-PBS must contain identical manifest indices.")
+    if set(kuleshov) != set(ffpbs):
+        raise ValueError(
+            "DT4LM-Kuleshov and FF-PBS must contain identical manifest indices."
+        )
     if method_sample_size <= 0 or unique_sample_size < 0:
         raise ValueError("Sample sizes must be positive, with unique size non-negative.")
 
     rng = random.Random(seed)
-    base_success = _success_indices(base)
+    kuleshov_success = _success_indices(kuleshov)
     ff_success = _success_indices(ffpbs)
-    ff_unique = sorted(set(ff_success) - set(base_success))
+    ff_unique = sorted(set(ff_success) - set(kuleshov_success))
     selected = {
-        "base_overall": set(
-            rng.sample(base_success, min(method_sample_size, len(base_success)))
+        "kuleshov_overall": set(
+            rng.sample(
+                kuleshov_success, min(method_sample_size, len(kuleshov_success))
+            )
         ),
         "ffpbs_overall": set(
             rng.sample(ff_success, min(method_sample_size, len(ff_success)))
@@ -77,8 +81,8 @@ def build_sample(
 
     units = {}
     for cohort, indices in selected.items():
-        method = "Base" if cohort == "base_overall" else "FF-PBS"
-        source = base if method == "Base" else ffpbs
+        method = "DT4LM-Kuleshov" if cohort == "kuleshov_overall" else "FF-PBS"
+        source = kuleshov if method == "DT4LM-Kuleshov" else ffpbs
         for dataset_index in indices:
             unit = units.setdefault(
                 (method, dataset_index),
@@ -125,7 +129,7 @@ def build_sample(
         "seed": seed,
         "review_unit_count": len(review_rows),
         "population_counts": {
-            "base_overall": len(base_success),
+            "kuleshov_overall": len(kuleshov_success),
             "ffpbs_overall": len(ff_success),
             "ffpbs_unique": len(ff_unique),
         },
@@ -136,7 +140,7 @@ def build_sample(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-results", required=True)
+    parser.add_argument("--kuleshov-results", required=True)
     parser.add_argument("--ffpbs-results", required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--output", required=True)
@@ -146,16 +150,16 @@ def main():
     parser.add_argument("--seed", type=int, default=765)
     args = parser.parse_args()
 
-    base = _index_results(args.base_results)
+    kuleshov = _index_results(args.kuleshov_results)
     ffpbs = _index_results(args.ffpbs_results)
     with open(args.manifest, encoding="utf-8") as handle:
         manifest = json.load(handle)
     expected = [int(value) for value in manifest["selected_indices"]]
-    if list(base) != expected or list(ffpbs) != expected:
+    if list(kuleshov) != expected or list(ffpbs) != expected:
         raise ValueError("Result order must exactly match the supplied manifest.")
 
     reviews, key = build_sample(
-        base,
+        kuleshov,
         ffpbs,
         method_sample_size=args.method_sample_size,
         unique_sample_size=args.unique_sample_size,

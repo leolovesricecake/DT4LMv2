@@ -32,12 +32,19 @@ attack:
   differential_objective: dynamic
   semantic_constraint: original
   query_budget: 1000
+  recipe_parameters:
+    max_candidates: 15
+    max_percent: 0.5
+    thought_vector_threshold: 0.2
+    max_log_prob_diff: 2.0
+    fluency_model_name_or_path: /mnt/huawei/nsq/models/openai-community/gpt2
   search:
     method: async_frontier
     ranking: dynamic
     beam_size: 5
     diagnostics:
       trace_enabled: false
+  model_batch_size: 32
 semantic:
   threshold:
     source: none

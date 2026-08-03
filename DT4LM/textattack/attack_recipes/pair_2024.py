@@ -75,7 +75,15 @@ class PAIR2024(AttackRecipe):
         ModelArgs.validate_classification_model_pair(
             model_wrapper, old_model_wrapper
         )
-        base_attack = base_recipe.build(model_wrapper)
+        recipe_parameters = args.base_recipe_parameters or {}
+        if not isinstance(recipe_parameters, dict):
+            raise ValueError("--base-recipe-parameters must decode to a JSON object.")
+        try:
+            base_attack = base_recipe.build(model_wrapper, **recipe_parameters)
+        except TypeError as exc:
+            raise ValueError(
+                f"Invalid parameters for base recipe {args.base_recipe!r}: {exc}"
+            ) from exc
 
         goal_function = DifferentialClassification(
             model_wrapper,
@@ -88,7 +96,7 @@ class PAIR2024(AttackRecipe):
         )
 
         if args.semantic_constraint == "nli":
-            # Importing lazily keeps Base/Static/LexiDT free of the NLI model
+            # Importing lazily keeps non-NLI recipes free of the NLI model
             # dependency and avoids allocating its memory for unrelated runs.
             from textattack.constraints.semantics import BidirectionalNLI
 
@@ -128,12 +136,12 @@ class PAIR2024(AttackRecipe):
             if (
                 args.differential_objective != "dynamic"
                 or args.semantic_constraint != "original"
-                or args.differential_search != "legacy_greedy"
+                or args.differential_search
+                not in {"recipe_native", "legacy_greedy"}
             ):
                 raise ValueError(
-                    "Static, LexiDT, SemDT, and asynchronous differential search "
-                    "require --base-recipe kuleshov_var. Other recipes currently "
-                    "support only dynamic/original/legacy_greedy compatibility mode."
+                    "Non-Kuleshov recipes support only the dynamic objective, "
+                    "original recipe constraints, and recipe-native search."
                 )
             # Existing LEAP/FastGA/etc. pair commands retain their own search
             # state machine. Only the differential goal is rebound, matching
@@ -143,7 +151,7 @@ class PAIR2024(AttackRecipe):
             base_attack.search_method.get_goal_results = goal_function.get_results
             return base_attack
 
-        if args.differential_search == "legacy_greedy":
+        if args.differential_search in {"recipe_native", "legacy_greedy"}:
             search_method = ComparatorGreedySearch(
                 comparator_for_objective(args.differential_objective)
             )

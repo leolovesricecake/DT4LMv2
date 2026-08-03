@@ -59,6 +59,14 @@ class MetricTests(unittest.TestCase):
                 "model_pair_queries": 10,
                 "queries_to_success": 10,
                 "modification_rate": 0.2,
+                "recipe_diagnostics": {
+                    "search_algorithm": "AsyncDifferentialBeamSearch",
+                    "transformation_call_count": 2,
+                    "generated_candidate_count": 12,
+                    "constraint_filter_call_count": 2,
+                    "constraint_filter_input_count": 12,
+                    "constraint_passed_candidate_count": 7,
+                },
                 "search_diagnostics": {
                     "ranking": "feasibility_pareto",
                     "infeasible_state_policy": "fill",
@@ -94,6 +102,14 @@ class MetricTests(unittest.TestCase):
                 "model_pair_queries": 1000,
                 "queries_to_success": None,
                 "modification_rate": 0.0,
+                "recipe_diagnostics": {
+                    "search_algorithm": "AsyncDifferentialBeamSearch",
+                    "transformation_call_count": 3,
+                    "generated_candidate_count": 18,
+                    "constraint_filter_call_count": 4,
+                    "constraint_filter_input_count": 20,
+                    "constraint_passed_candidate_count": 8,
+                },
                 "search_diagnostics": {
                     "ranking": "feasibility_pareto",
                     "infeasible_state_policy": "fill",
@@ -149,6 +165,15 @@ class MetricTests(unittest.TestCase):
         self.assertAlmostEqual(core["infeasible_fill_event_rate"], 2 / 3)
         self.assertAlmostEqual(core["infeasible_retained_state_rate"], 3 / 8)
         self.assertAlmostEqual(core["frontier_size_mean"], 8 / 3)
+        self.assertEqual(core["recipe_diagnostic_sample_count"], 2)
+        self.assertEqual(core["transformation_call_total"], 5)
+        self.assertEqual(core["generated_candidate_total"], 30)
+        self.assertEqual(core["constraint_filter_input_total"], 32)
+        self.assertEqual(core["constraint_passed_candidate_total"], 15)
+        self.assertAlmostEqual(core["candidate_constraint_pass_rate"], 15 / 32)
+        self.assertAlmostEqual(
+            core["generated_candidates_per_model_pair_query"], 30 / 1011
+        )
         self.assertAlmostEqual(
             core["frontier_modified_set_diversity_mean"], 2 / 3
         )
@@ -218,6 +243,7 @@ class MetricTests(unittest.TestCase):
         )
 
         self.assertEqual(len(reviews), 4)
+        self.assertEqual(key["population_counts"]["kuleshov_overall"], 2)
         self.assertEqual(key["population_counts"]["ffpbs_unique"], 1)
         self.assertEqual(rates["lpr"], 2 / 3)
         self.assertEqual(rates["spr"], 2 / 3)
@@ -242,6 +268,7 @@ class MetricTests(unittest.TestCase):
                 },
                 "attack": {
                     "recipe": "kuleshov_var",
+                    "recipe_parameters": {"max_candidates": 15},
                     "differential_objective": "dynamic",
                     "query_budget": 1000,
                     "search": {
@@ -332,6 +359,10 @@ class MetricTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
 
             self.assertEqual(rows[0]["method"], "ff-pbs")
+            self.assertEqual(rows[0]["search_algorithm"], "AsyncDifferentialBeamSearch")
+            self.assertEqual(
+                json.loads(rows[0]["recipe_parameters"]), {"max_candidates": 15}
+            )
             self.assertEqual(rows[0]["frontier_ranking"], "feasibility_pareto")
             self.assertEqual(rows[0]["paper_gsr"], "0.5")
             self.assertEqual(rows[0]["frontier_sort_seconds"], "0.1")

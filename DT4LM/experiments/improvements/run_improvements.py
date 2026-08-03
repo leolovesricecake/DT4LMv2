@@ -3,6 +3,7 @@
 
 import argparse
 from collections import Counter
+import copy
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 import json
@@ -306,6 +307,26 @@ def _dataset_argument(config, project_root):
     return str(local.resolve()) if local.exists() else configured
 
 
+def _recipe_parameters(config, project_root):
+    """Resolve auxiliary model paths before serializing recipe parameters."""
+
+    recipe = str(config["attack"]["recipe"])
+    parameters = copy.deepcopy(config["attack"]["recipe_parameters"])
+    if recipe == "kuleshov_var":
+        parameters["fluency_model_name_or_path"] = resolve_model_id(
+            project_root, parameters["fluency_model_name_or_path"]
+        )
+    if recipe == "faster-alzantot" and parameters["language_model_path"]:
+        model_path = resolve_path(project_root, parameters["language_model_path"])
+        if not model_path.is_dir():
+            raise FileNotFoundError(
+                f"FastGA Learning-to-Write model directory does not exist: "
+                f"{model_path}."
+            )
+        parameters["language_model_path"] = str(model_path)
+    return parameters
+
+
 def _attack_command(config, run_dir, manifest, project_root):
     """Build one attack command from the complete experiment YAML."""
 
@@ -322,6 +343,8 @@ def _attack_command(config, run_dir, manifest, project_root):
         "pair",
         "--base-recipe",
         str(attack["recipe"]),
+        "--base-recipe-parameters",
+        json.dumps(_recipe_parameters(config, project_root), sort_keys=True),
         "--differential-objective",
         str(attack["differential_objective"]),
         "--semantic-constraint",
@@ -330,6 +353,8 @@ def _attack_command(config, run_dir, manifest, project_root):
         "-1",
         "--query-budget",
         str(attack["query_budget"]),
+        "--model-batch-size",
+        str(attack["model_batch_size"]),
         "--random-seed",
         str(experiment["seed"]),
         "--model",
