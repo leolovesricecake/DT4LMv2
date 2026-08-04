@@ -1,6 +1,7 @@
 """Structured per-sample JSONL logging for reproducible experiments."""
 
 import json
+import os
 
 from textattack.shared import logger
 
@@ -113,9 +114,13 @@ class JSONLLogger(Logger):
         self._flushed = False
 
     def flush(self):
-        with open(self.filename, "w", encoding="utf-8") as handle:
+        # Publish results only after every row is durable; an interrupted flush
+        # must not look like a resumable complete attack checkpoint.
+        temporary = self.filename + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
             for row in self._rows:
                 handle.write(json.dumps(row, ensure_ascii=True) + "\n")
+        os.replace(temporary, self.filename)
         self._flushed = True
 
     def close(self):

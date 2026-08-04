@@ -23,20 +23,31 @@ METHODS = {
     "ff-pbs",
     "ff-pbs-k3",
     "ff-pbs-k10",
+    "ffms-greedy",
+    "hard-ffms",
 }
 
 
 class ConfigTests(unittest.TestCase):
+    def test_wordnet_recipe_never_downloads_during_runtime(self):
+        source = (
+            ROOT
+            / "textattack/transformations/word_swaps/word_swap_wordnet.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("nltk.download(", source)
+        self.assertIn("wordnet.ensure_loaded()", source)
+
     def test_active_matrix_contains_only_paper_methods(self):
         paths = sorted(CONFIG_ROOT.glob("*/*.yaml"))
         configs = [load_experiment_config(path) for path in paths]
 
-        self.assertEqual(len(configs), 80)
+        self.assertEqual(len(configs), 144)
         grouped = {}
         for config in configs:
             key = (config["dataset"]["id"], config["models"]["id"])
             grouped.setdefault(key, set()).add(config["experiment"]["method"])
-        self.assertEqual(len(grouped), 8)
+        self.assertEqual(len(grouped), 12)
         self.assertTrue(all(methods == METHODS for methods in grouped.values()))
 
     def test_system_recipes_keep_native_search_and_explicit_parameters(self):

@@ -73,6 +73,8 @@ models:
 | FF-Pareto-Greedy | `feasibility_pareto` | 1 | `fill` |
 | Hard-PBS | `feasibility_pareto` | 5 | `discard` |
 | FF-MNew | `feasibility_mnew` | 5 | `fill` |
+| FFMS-Greedy | `feasibility_mnew` | 1 | `fill` |
+| Hard-FFMS | `feasibility_mnew` | 5 | `discard` |
 | FF-PBS | `feasibility_pareto` | 5 | `fill` |
 
 `ff-pbs-k3` 和 `ff-pbs-k10` 用于宽度敏感性分析。此类方法都使用相同
@@ -84,9 +86,9 @@ Kuleshov 变换、约束、模型 batch size 和查询预算，才可以用于�
 python experiments/improvements/generate_ffpbs_configs.py
 ```
 
-生成器会为每个 dataset/model-pair 生成 10 份完整配置：三个 DT4LM Recipe、
-五个主实验/消融及两个额外宽度。当前 4 个数据集、2 个 model pair 共
-80 份活动配置。旧 `<model-pair>-base.yaml` 会一次性迁移为
+生成器会为每个 dataset/model-pair 生成 12 份完整配置：三个 DT4LM Recipe、
+七个主实验/消融及两个额外宽度。当前 4 个数据集、3 个 model pair 共
+144 份活动配置。旧 `<model-pair>-base.yaml` 会一次性迁移为
 `<model-pair>-dt4lm-kuleshov.yaml`。
 
 每份配置都显式写入：
@@ -119,8 +121,11 @@ test -d /mnt/huawei/nsq/models/openai-community/gpt2
 LEAP 使用 WordNet 同义词替换。离线运行前先下载 NLTK 资源：
 
 ```bash
-python -m nltk.downloader wordnet omw-1.4
+python -m nltk.downloader wordnet
 ```
+
+实验进程只检查本地资源，不会隐式访问网络。只有使用非英语 WordNet 时
+才需要额外执行 `python -m nltk.downloader omw-1.4`。
 
 ### 4.3 FastGA Learning-to-Write 模型
 
@@ -263,6 +268,21 @@ python statistics/recompute_metrics.py \
 ```
 
 `--stage core` 和 `--stage quality` 可分别重算。
+
+### 9.1 长时间阶段诊断
+
+运行器会输出带 UTC 时间戳的 `attack`、`core` 和 `quality` 阶段边界。quality
+阶段还会为 BLEU、METEOR、ROUGE-L 和 BERTScore 分别输出开始、结束和耗时。
+当前运行状态可直接查看：
+
+```bash
+RUN=outputs/dt4lm-improvements/runs/mr/albertbasev1-v2/mr-albertbasev1-v2-ff-mnew
+cat "$RUN/status.json"
+cat "$RUN/metrics/quality.json"
+```
+
+quality 执行中的 `quality.json` 会记录 `active_metric`。每个已完成指标都会立即原子
+checkpoint；中断后重新执行同一配置，已完成项会显示 `RESUME` 并被跳过。
 
 ## 10. 生成论文总表
 

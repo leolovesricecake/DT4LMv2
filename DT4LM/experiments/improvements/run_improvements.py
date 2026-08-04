@@ -109,6 +109,13 @@ def _set_stage(status_path, stage, state, error=None, **details):
     _write_json_atomic(status_path, status)
 
 
+def _stage_log(message):
+    """Print a timestamped pipeline event so long stages remain observable."""
+
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    print(f"[DT4LM {timestamp}] {message}", flush=True)
+
+
 def _read_json(path):
     """Read one JSON artifact used by resume validation."""
 
@@ -458,34 +465,6 @@ def _attack_command(config, run_dir, manifest, project_root):
     return command
 
 
-def _split_results(run_dir):
-    """Store successful, failed, and skipped records beside canonical JSONL."""
-
-    directories = {
-        status: run_dir / f"{status}_examples"
-        for status in ("successful", "failed", "skipped")
-    }
-    for directory in directories.values():
-        directory.mkdir(exist_ok=True)
-    records = []
-    with open(run_dir / "results.jsonl", encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            status = row.get("result_status")
-            if status not in directories:
-                raise ValueError(f"Invalid result_status in JSONL: {status!r}.")
-            records.append(row)
-            with open(
-                directories[status] / f"{row['dataset_index']}.json",
-                "w",
-                encoding="utf-8",
-            ) as output:
-                json.dump(row, output, ensure_ascii=True, indent=2, sort_keys=True)
-    return records
-
-
 def _augment_attack_summary(path, records):
     """Persist explicit three-way counts in the attack-stage result artifact."""
 
@@ -533,6 +512,7 @@ def main():
     args = parser.parse_args()
 
     config_path = Path(args.config).resolve()
+    _stage_log(f"Loading and validating config: {config_path}")
     config = load_experiment_config(config_path)
     validate_artifact_namespaces(config, PROJECT_ROOT)
     split = str(config["dataset"]["evaluation"]["split"])
@@ -563,10 +543,11 @@ def main():
 
     status_path = run_dir / "status.json"
     if (run_dir / "results.jsonl").exists():
+        _stage_log("Validating an existing attack result checkpoint.")
         records = _load_completed_results(run_dir, manifest_payload)
         _augment_attack_summary(run_dir / "attack_summary.json", records)
         _set_stage(status_path, "attack", "completed", resumed=True)
-        print(f'results existed: {run_dir}')
+        _stage_log(f"Attack checkpoint is complete; resumed {run_dir}.")
     else:
         _set_stage(status_path, "attack", "running")
         try:
@@ -574,14 +555,17 @@ def main():
             trace_path = run_dir / "search_trace.jsonl"
             if trace_path.exists():
                 trace_path.unlink()
+            _stage_log("Starting TextAttack subprocess.")
             subprocess.run(
                 _attack_command(config, run_dir, manifest, PROJECT_ROOT),
                 cwd=PROJECT_ROOT,
                 check=True,
             )
-            records = _split_results(run_dir)
+            _stage_log("TextAttack exited; validating canonical results.jsonl.")
+            records = _load_completed_results(run_dir, manifest_payload)
             _augment_attack_summary(run_dir / "attack_summary.json", records)
             _set_stage(status_path, "attack", "completed", resumed=False)
+            _stage_log(f"Attack stage completed with {len(records)} result rows.")
         except Exception as exc:
             _set_stage(status_path, "attack", "failed", exc)
             raise
@@ -590,15 +574,18 @@ def main():
     query_budget = config["attack"]["query_budget"]
     if _core_evaluation_complete(run_dir, core_config, query_budget):
         _set_stage(status_path, "core_evaluation", "completed", resumed=True)
+        _stage_log("Core metric checkpoint is complete; skipping recomputation.")
     else:
         _set_stage(status_path, "core_evaluation", "running")
         try:
+            _stage_log("Starting core metric evaluation.")
             subprocess.run(
                 _evaluation_command(resolved_config_path, run_dir, "core"),
                 cwd=PROJECT_ROOT,
                 check=True,
             )
             _set_stage(status_path, "core_evaluation", "completed", resumed=False)
+            _stage_log("Core metric evaluation completed.")
         except Exception as exc:
             _set_stage(status_path, "core_evaluation", "failed", exc)
             raise
@@ -606,8 +593,10 @@ def main():
     quality_config = config["evaluation"]["quality"]
     if _quality_evaluation_complete(run_dir, quality_config):
         _set_stage(status_path, "quality_evaluation", "completed", resumed=True)
+        _stage_log("Quality metric checkpoint is complete; run finished.")
     else:
         _set_stage(status_path, "quality_evaluation", "running")
+        _stage_log("Starting quality metric evaluation.")
         quality_process = subprocess.run(
             _evaluation_command(resolved_config_path, run_dir, "quality"),
             cwd=PROJECT_ROOT,
@@ -615,12 +604,17 @@ def main():
         )
         quality_summary = run_dir / "metrics" / "quality.json"
         if quality_process.returncode != 0 or not quality_summary.exists():
+            error = (
+                f"quality evaluator exited with code "
+                f"{quality_process.returncode}"
+            )
             _set_stage(
                 status_path,
                 "quality_evaluation",
                 "failed",
-                f"quality evaluator exited with code {quality_process.returncode}",
+                error,
             )
+            raise RuntimeError(error)
         else:
             quality = _read_json(quality_summary)
             _set_stage(
@@ -629,6 +623,19 @@ def main():
                 quality["status"],
                 resumed=False,
             )
+            _stage_log(
+                f"Quality metric evaluation finished with status "
+                f"{quality['status']!r}."
+            )
+            if quality["status"] != "completed":
+                failures = {
+                    name: payload.get("error", "unknown error")
+                    for name, payload in (quality.get("metrics") or {}).items()
+                    if payload.get("status") == "failed"
+                }
+                raise RuntimeError(
+                    f"Quality evaluation did not complete: {failures!r}."
+                )
 
 
 if __name__ == "__main__":

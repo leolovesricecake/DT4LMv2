@@ -129,6 +129,11 @@ QUALITY_COLUMNS = [
     "bertscore_recall",
     "bertscore_f1",
     "quality_successful_sample_count",
+    "bleu_seconds",
+    "meteor_seconds",
+    "rouge_l_seconds",
+    "bertscore_seconds",
+    "quality_evaluation_seconds",
 ]
 
 RESOURCE_COLUMNS = [
@@ -290,6 +295,13 @@ def _quality_fields(quality):
     bertscore = ((metrics.get("bertscore") or {}).get("values") or {})
     for name in ("precision", "recall", "f1"):
         fields[f"bertscore_{name}"] = bertscore.get(name)
+    elapsed = []
+    for name in QUALITY_METRICS:
+        seconds = (metrics.get(name) or {}).get("elapsed_seconds")
+        fields[f"{name}_seconds"] = seconds
+        if seconds is not None:
+            elapsed.append(float(seconds))
+    fields["quality_evaluation_seconds"] = sum(elapsed) if elapsed else None
     return fields
 
 

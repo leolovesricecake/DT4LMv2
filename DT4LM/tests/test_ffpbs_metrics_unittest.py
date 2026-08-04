@@ -206,6 +206,31 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(result["hard_discarded_infeasible_state_count"], 3)
         self.assertEqual(result["hard_discard_rate"], 3 / 8)
 
+    def test_quality_metrics_checkpoint_each_disabled_metric(self):
+        quality_config = {
+            name: {"enabled": False}
+            for name in ("bleu", "meteor", "rouge_l", "bertscore")
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            summary = evaluation.run_quality_metrics(
+                [], quality_config, output_dir, ROOT
+            )
+            checkpoint = json.loads(
+                (output_dir / "quality.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(summary["status"], "completed")
+        self.assertIsNone(checkpoint["active_metric"])
+        self.assertEqual(set(checkpoint["metrics"]), set(quality_config))
+        self.assertTrue(
+            all(
+                item["status"] == "disabled"
+                and item["elapsed_seconds"] >= 0
+                for item in checkpoint["metrics"].values()
+            )
+        )
+
     def test_human_protocol_samples_methods_and_unique_success_separately(self):
         def row(index, status):
             return {

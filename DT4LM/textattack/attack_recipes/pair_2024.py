@@ -79,6 +79,9 @@ class PAIR2024(AttackRecipe):
         if not isinstance(recipe_parameters, dict):
             raise ValueError("--base-recipe-parameters must decode to a JSON object.")
         try:
+            textattack.shared.logger.info(
+                f"Building PAIR base recipe: {args.base_recipe}"
+            )
             base_attack = base_recipe.build(model_wrapper, **recipe_parameters)
         except TypeError as exc:
             raise ValueError(

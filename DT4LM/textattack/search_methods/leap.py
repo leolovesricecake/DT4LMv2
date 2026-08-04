@@ -109,15 +109,10 @@ class LEAP(PopulationBasedSearch):
         Returns:
             New `Position` that we moved to (or if we fail to move, same as `source_text`)
         """
-        try:
-            assert len(source_text.words) == len(
-                target_text.words
-            ), "Word length mismatch for turn operation."
-            assert len(source_text.words) == len(
-                prob
-            ), "Length mismatch for words and probability list."
-        except:
-            pass
+        if len(source_text.words) != len(target_text.words):
+            raise ValueError("Word length mismatch for LEAP turn operation.")
+        if len(source_text.words) != len(prob):
+            raise ValueError("LEAP turn probabilities do not match word count.")
         len_x = len(source_text.words)
 
         num_tries = 0
@@ -307,40 +302,43 @@ class LEAP(PopulationBasedSearch):
                     # calculate the probability of turning each word
                     pop_mem_words = population[k].words
                     local_elite_words = local_elites[k].words
-                    assert len(pop_mem_words) == len(
-                        local_elite_words
-                    ) # , 
-                    try:
-                        for d in range(len(pop_mem_words)):
-                            velocities[k][d] = omega[k] * velocities[k][d] + (1 - omega[k]) * (
-                                    self._equal(pop_mem_words[d], local_elite_words[d])
-                                    + self._equal(pop_mem_words[d], global_elite.words[d])
+                    if len(pop_mem_words) != len(local_elite_words):
+                        raise ValueError("LEAP elite and population lengths differ.")
+                    for d in range(len(pop_mem_words)):
+                        velocities[k][d] = (
+                            omega[k] * velocities[k][d]
+                            + (1 - omega[k])
+                            * (
+                                self._equal(pop_mem_words[d], local_elite_words[d])
+                                + self._equal(pop_mem_words[d], global_elite.words[d])
                             )
-                    except:
-                        pass
-                    
+                        )
+
                     turn_list = np.array([velocities[k]])
                     turn_prob = softmax(turn_list)[0]
                     # print("reached here")
-                    try:
-                        if np.random.uniform() < P1:
-                            population[k] = self._turn(
-                                local_elites[k],
-                                population[k],
-                                turn_prob,
-                                initial_result.attacked_text, )
-                        if np.random.uniform() < P2:
-                            population[k] = self._turn(
-                                global_elite,
-                                population[k],
-                                turn_prob,
-                                initial_result.attacked_text,)
-                    except:
-                        pass
+                    if np.random.uniform() < P1:
+                        population[k] = self._turn(
+                            local_elites[k],
+                            population[k],
+                            turn_prob,
+                            initial_result.attacked_text,
+                        )
+                    if np.random.uniform() < P2:
+                        population[k] = self._turn(
+                            global_elite,
+                            population[k],
+                            turn_prob,
+                            initial_result.attacked_text,
+                        )
                 # Check if there is any successful attack in the current population
                 pop_results, self._search_over = self.get_goal_results(
                     [p.attacked_text for p in population]
                 )
+                if not pop_results:
+                    # A fully consumed query budget may truncate this batch to
+                    # zero; return the best previously evaluated state.
+                    return global_elite.result
                 if self._search_over:
                     # if `get_goal_results` gets cut short by query budget, resize population
                     population = population[: len(pop_results)]
@@ -384,8 +382,8 @@ class LEAP(PopulationBasedSearch):
                     global_elite = copy.copy(top_member)
 
             return global_elite.result
-        except:
-            return initial_result
+        except Exception as exc:
+            raise RuntimeError("LEAP search failed.") from exc
 
     def check_transformation_compatibility(self, transformation):
         """The genetic algorithm is specifically designed for word

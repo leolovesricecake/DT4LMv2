@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from statistics import mean, median, quantiles
 import sys
+import time
 
 from packaging.version import Version
 
@@ -715,6 +716,7 @@ def run_quality_metrics(records, quality_config, output_dir, project_root):
     }
     output_dir = Path(output_dir)
     quality_path = output_dir / "quality.json"
+    runtime = evaluation_runtime()
     previous_metrics = {}
     if quality_path.exists():
         try:
@@ -728,6 +730,21 @@ def run_quality_metrics(records, quality_config, output_dir, project_root):
         except (json.JSONDecodeError, OSError):
             previous_metrics = {}
 
+    def write_checkpoint(results, status, active_metric=None):
+        """Persist completed metrics and identify an in-progress calculation."""
+
+        summary = {
+            "schema_version": METRICS_SCHEMA_VERSION,
+            "status": status,
+            "active_metric": active_metric,
+            "metrics": results,
+            "successful_sample_count": len(successful),
+            "evaluation_runtime": runtime,
+            "checkpointed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _write_json_atomic(quality_path, summary)
+        return summary
+
     results = {}
     for name, calculate in calculators.items():
         prior = previous_metrics.get(name) or {}
@@ -740,21 +757,33 @@ def run_quality_metrics(records, quality_config, output_dir, project_root):
             and prior.get("config") == quality_config[name]
         ):
             payload = prior
+            print(
+                f"[quality] RESUME {name}: checkpoint already {expected_status}.",
+                flush=True,
+            )
         else:
+            write_checkpoint(results, "running", active_metric=name)
+            started_at = time.perf_counter()
+            print(
+                f"[quality] START {name}: {len(successful)} successful samples.",
+                flush=True,
+            )
             payload = _metric_payload(quality_config[name], calculate)
+            payload["elapsed_seconds"] = time.perf_counter() - started_at
+            print(
+                f"[quality] END {name}: status={payload['status']}, "
+                f"elapsed={payload['elapsed_seconds']:.3f}s.",
+                flush=True,
+            )
         results[name] = payload
-    summary = {
-        "schema_version": METRICS_SCHEMA_VERSION,
-        "status": (
-            "failed"
-            if any(item["status"] == "failed" for item in results.values())
-            else "completed"
-        ),
-        "metrics": results,
-        "successful_sample_count": len(successful),
-        "evaluation_runtime": evaluation_runtime(),
-    }
-    _write_json_atomic(quality_path, summary)
+        # Save after every metric so an interruption never discards completed work.
+        write_checkpoint(results, "running")
+    final_status = (
+        "failed"
+        if any(item["status"] == "failed" for item in results.values())
+        else "completed"
+    )
+    summary = write_checkpoint(results, final_status)
     # Remove schema-v2 files only after the consolidated artifact is durable.
     for name in calculators:
         legacy_path = output_dir / f"{name}.json"

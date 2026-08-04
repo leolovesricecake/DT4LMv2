@@ -316,6 +316,9 @@ class ModelArgs:
             # Support loading TextAttack-trained models via just their folder path.
             # If `args.model` is a path/directory, let's assume it was a model
             # trained with textattack, and try and load it.
+            textattack.shared.logger.info(
+                f"Loading local primary model and tokenizer: {args.model}"
+            )
             if os.path.exists(os.path.join(args.model, "t5-wrapper-config.json")):
                 model = textattack.models.helpers.T5ForTextToText.from_pretrained(
                     args.model
@@ -390,6 +393,9 @@ class ModelArgs:
             raise ValueError(
                 "Model-pair attacks require --second-model to identify the old model."
             )
+        textattack.shared.logger.info(
+            f"Loading secondary model and tokenizer: {args.second_model}"
+        )
         wrapper = cls._create_huggingface_classification_wrapper(
             args.second_model,
             model_revision=args.second_model_revision,

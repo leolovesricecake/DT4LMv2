@@ -216,6 +216,14 @@ class GeneticAlgorithm(PopulationBasedSearch, ABC):
             return pop_mem
         else:
             new_results, self._search_over = self.get_goal_results([new_text])
+            if not new_results:
+                # Exhausting the query budget is a normal termination path;
+                # retain the better evaluated parent instead of indexing an
+                # empty truncated result batch.
+                return max(
+                    (pop_member1, pop_member2),
+                    key=lambda member: member.result.score,
+                )
             return PopulationMember(
                 new_text, result=new_results[0], attributes=attributes
             )
@@ -282,8 +290,8 @@ class GeneticAlgorithm(PopulationBasedSearch, ABC):
                 population = [population[0]] + children
 
             return population[0].result
-        except:
-            return initial_result
+        except Exception as exc:
+            raise RuntimeError("Genetic-algorithm search failed.") from exc
 
     def check_transformation_compatibility(self, transformation):
         """The genetic algorithm is specifically designed for word

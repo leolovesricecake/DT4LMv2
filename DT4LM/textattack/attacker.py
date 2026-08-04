@@ -520,8 +520,7 @@ class Attacker:
         if self.attack_args.enable_advance_metrics:
             self.attack_log_manager.enable_advance_metrics = True
 
-        self.attack_log_manager.log_summary()
-        self.attack_log_manager.flush()
+        self._finalize_attack_logs()
         print()
 
     def _attack_parallel(self):
@@ -835,9 +834,28 @@ class Attacker:
         if self.attack_args.enable_advance_metrics:
             self.attack_log_manager.enable_advance_metrics = True
 
-        self.attack_log_manager.log_summary()
-        self.attack_log_manager.flush()
+        self._finalize_attack_logs()
         print()
+
+    def _finalize_attack_logs(self):
+        """Report summary and flush timings at the attack/pipeline boundary."""
+
+        summary_started = time.perf_counter()
+        print("[textattack] Computing final attack summary.", flush=True)
+        self.attack_log_manager.log_summary()
+        print(
+            f"[textattack] Final attack summary completed in "
+            f"{time.perf_counter() - summary_started:.3f}s.",
+            flush=True,
+        )
+        flush_started = time.perf_counter()
+        print("[textattack] Flushing structured attack logs.", flush=True)
+        self.attack_log_manager.flush()
+        print(
+            f"[textattack] Structured attack logs flushed in "
+            f"{time.perf_counter() - flush_started:.3f}s.",
+            flush=True,
+        )
 
     def attack_dataset(self):
         """Attack the dataset.

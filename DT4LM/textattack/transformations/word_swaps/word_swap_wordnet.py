@@ -25,7 +25,26 @@ class WordSwapWordNet(WordSwap):
     """
 
     def __init__(self, language="eng"):
-        nltk.download("omw-1.4")
+        # Experiment startup must never perform an implicit network request.
+        # WordNet is prepared explicitly so offline runs fail immediately with
+        # an actionable command instead of waiting in NLTK's downloader.
+        try:
+            wordnet.ensure_loaded()
+        except LookupError as exc:
+            raise LookupError(
+                "WordSwapWordNet requires the local NLTK WordNet corpus. "
+                "Prepare it before the experiment with: "
+                "python -m nltk.downloader wordnet"
+            ) from exc
+        if language != "eng":
+            try:
+                nltk.data.find("corpora/omw-1.4")
+            except LookupError as exc:
+                raise LookupError(
+                    "Non-English WordSwapWordNet requires the local omw-1.4 "
+                    "corpus. Prepare it with: "
+                    "python -m nltk.downloader omw-1.4"
+                ) from exc
         if language not in wordnet.langs():
             raise ValueError(f"Language {language} not one of {wordnet.langs()}")
         self.language = language
