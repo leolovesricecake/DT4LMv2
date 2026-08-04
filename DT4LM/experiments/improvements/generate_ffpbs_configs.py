@@ -108,6 +108,20 @@ CONTROLLED_METHODS = {
         "infeasible_state_policy": "fill",
         "diagnostics": {"trace_enabled": False},
     },
+    "ffms-greedy": {
+        "method": "async_frontier",
+        "ranking": "feasibility_mnew",
+        "beam_size": 1,
+        "infeasible_state_policy": "fill",
+        "diagnostics": {"trace_enabled": False},
+    },
+    "hard-ffms": {
+        "method": "async_frontier",
+        "ranking": "feasibility_mnew",
+        "beam_size": 5,
+        "infeasible_state_policy": "discard",
+        "diagnostics": {"trace_enabled": False},
+    },
 }
 
 DEPRECATED_SUFFIXES = (

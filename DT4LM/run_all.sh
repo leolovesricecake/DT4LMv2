@@ -1,29 +1,62 @@
+#!/usr/bin/env bash
+
 set -euo pipefail
+
+if (( $# < 2 )); then
+  echo "Usage: $0 <dataset> <cuda_devices> [model_id]" >&2
+  exit 2
+fi
 
 DATASET="$1"
 CUDA_DEVICES="$2"
-# MODEL_ID="${3:albertbasev1-v2}"
+MODEL_ID="${3:-albertbasev1-v2}"  # albertbasev1-v2  gpt1-2  debertabasev1-v3
 
-CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/${DATASET}/albertbasev1-v2-base.yaml
+METHODS=(
+  dt4lm-kuleshov
+  dt4lm-fastga
+  dt4lm-leap
+  ff-pbs
+  dynamic-beam
+  ff-pareto-greedy
+  hard-pbs
+  ff-mnew
+  ffms-greedy
+  hard-ffms
+)
 
-CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/${DATASET}/albertbasev1-v2-ff-pbs.yaml
+FAILED_METHODS=()
 
-CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/${DATASET}/albertbasev1-v2-dynamic-beam.yaml
+for method in "${METHODS[@]}"; do
+  config_path="experiments/improvements/configs/${DATASET}/${MODEL_ID}-${method}.yaml"
 
-CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/${DATASET}/albertbasev1-v2-ff-pareto-greedy.yaml
+  echo
+  echo "============================================================"
+  echo "Running method: ${method}"
+  echo "Config: ${config_path}"
+  echo "============================================================"
 
-CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/${DATASET}/albertbasev1-v2-hard-pbs.yaml
+  if CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" \
+    bash experiments/improvements/run_first_round.sh "${config_path}"; then
+    echo "[SUCCESS] ${method}"
+  else
+    exit_code=$?
+    echo "[FAILED] ${method} (exit code: ${exit_code})" >&2
+    FAILED_METHODS+=("${method}")
+  fi
+done
 
-CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/${DATASET}/albertbasev1-v2-ff-mnew.yaml
+echo
+echo "============================================================"
+echo "Execution summary"
+echo "============================================================"
 
-CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/${DATASET}/albertbasev1-v2-ff-pbs-k3.yaml
+if (( ${#FAILED_METHODS[@]} == 0 )); then
+  echo "All methods completed successfully."
+  exit 0
+fi
 
-CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" bash experiments/improvements/run_first_round.sh \
-  experiments/improvements/configs/${DATASET}/albertbasev1-v2-ff-pbs-k10.yaml
+echo "Failed methods (${#FAILED_METHODS[@]}):" >&2
+printf '  - %s\n' "${FAILED_METHODS[@]}" >&2
+
+# 所有方法均已尝试执行，但只要存在失败项，脚本最终返回非零状态。
+exit 1

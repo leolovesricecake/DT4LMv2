@@ -566,7 +566,7 @@ def main():
         records = _load_completed_results(run_dir, manifest_payload)
         _augment_attack_summary(run_dir / "attack_summary.json", records)
         _set_stage(status_path, "attack", "completed", resumed=True)
-        print('results existed.')
+        print(f'results existed: {run_dir}')
     else:
         _set_stage(status_path, "attack", "running")
         try:

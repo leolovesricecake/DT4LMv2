@@ -1,0 +1,81 @@
+schema_version: 2
+experiment:
+  id: mr-debertabasev1-v3-ff-pbs
+  method: ff-pbs
+  seed: 765
+  output_root: outputs/dt4lm-improvements
+dataset:
+  id: mr
+  path: outputs/datasets/mr
+  revision: null
+  text_columns:
+  - text
+  label_column: label
+  task_definition: Classify the movie review sentiment as negative or positive.
+  evaluation:
+    split: test
+    sample_size: 1000
+    sample_seed: 765
+    manifest: outputs/dt4lm-improvements/sample_sets/mr/test-n1000-seed765.json
+models:
+  id: debertabasev1-v3
+  old:
+    name_or_path: outputs/finetuned/debertav1base_mr/best_model
+    revision: null
+  new:
+    name_or_path: outputs/finetuned/debertav1base_mr/best_model
+    revision: null
+attack:
+  recipe: kuleshov_var
+  differential_objective: dynamic
+  semantic_constraint: original
+  query_budget: 1000
+  recipe_parameters:
+    max_candidates: 15
+    max_percent: 0.5
+    thought_vector_threshold: 0.2
+    max_log_prob_diff: 2.0
+    fluency_model_name_or_path: /mnt/huawei/nsq/models/openai-community/gpt2
+  search:
+    method: async_frontier
+    ranking: feasibility_pareto
+    beam_size: 5
+    infeasible_state_policy: fill
+    diagnostics:
+      trace_enabled: false
+  model_batch_size: 32
+semantic:
+  threshold:
+    source: none
+calibration:
+  enabled: false
+evaluation:
+  core:
+    success_budgets:
+    - 100
+    - 200
+    - 300
+    - 400
+    - 500
+    - 600
+    - 700
+    - 800
+    - 900
+    - 1000
+  quality:
+    bleu:
+      enabled: true
+    meteor:
+      enabled: true
+    rouge_l:
+      enabled: true
+    bertscore:
+      enabled: true
+      model_name_or_path: /mnt/huawei/nsq/models/microsoft/deberta-large-mnli
+      num_layers: 17
+      allow_remote_download: false
+      device: cuda
+      batch_size: 32
+      idf: false
+      rescale_with_baseline: false
+      baseline_path: null
