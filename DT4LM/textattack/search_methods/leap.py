@@ -117,6 +117,7 @@ class LEAP(PopulationBasedSearch):
 
         num_tries = 0
         passed_constraints = False
+        dimension_preserved = False
         while num_tries < self.max_turn_retries + 1:
             indices_to_replace = []
             words_to_replace = []
@@ -127,6 +128,13 @@ class LEAP(PopulationBasedSearch):
             new_text = source_text.attacked_text.replace_words_at_indices(
                 indices_to_replace, words_to_replace
             )
+            # LEAP's velocity vector assigns one coordinate to every original
+            # word. A malformed/re-tokenized replacement cannot participate in
+            # this fixed-dimensional turn operation.
+            if new_text.num_words != len_x:
+                num_tries += 1
+                continue
+            dimension_preserved = True
             indices_to_replace = set(indices_to_replace)
             new_text.attack_attrs["modified_indices"] = (
                                                                 source_text.attacked_text.attack_attrs[
@@ -157,7 +165,7 @@ class LEAP(PopulationBasedSearch):
 
             num_tries += 1
 
-        if self.post_turn_check and not passed_constraints:
+        if not dimension_preserved or (self.post_turn_check and not passed_constraints):
             # If we cannot find a turn that passes the constraints, we do not move.
             return source_text
         else:
@@ -181,11 +189,20 @@ class LEAP(PopulationBasedSearch):
             current_text, original_text=original_result.attacked_text
         )
         for transformed_text in transformed_texts:
-            # print("transformed_text: ", transformed_text.words)
-            # print("transformed_text length: ", len(transformed_text.words))
-            diff_idx = next(
-                iter(transformed_text.attack_attrs["newly_modified_indices"])
+            # LEAP is a position-wise fixed-dimensional search. Some nominal
+            # word swaps can be re-tokenized into multiple words while
+            # AttackedText reconstructs punctuation or multi-column inputs;
+            # admitting them would desynchronize the velocity matrix.
+            if transformed_text.num_words != current_text.num_words:
+                continue
+            newly_modified = transformed_text.attack_attrs.get(
+                "newly_modified_indices", set()
             )
+            if len(newly_modified) != 1:
+                continue
+            diff_idx = next(iter(newly_modified))
+            if not 0 <= diff_idx < len(neighbors_list):
+                continue
             neighbors_list[diff_idx].append(transformed_text)
 
         best_neighbors = [] # for transformation on each word, what is the best neighbor -> {best_neighbor}
@@ -267,25 +284,27 @@ class LEAP(PopulationBasedSearch):
                 ]
             )
 
-            global_elite = max(population, key=lambda x: x.score) # a population member, can access the goal function result: self.result
+            # Keep the best-so-far container independent because mutation later
+            # updates PopulationMember objects in place.
+            global_elite = copy.copy(max(population, key=lambda x: x.score))
             if (
                     self._search_over
                     or global_elite.result.goal_status == GoalFunctionResultStatus.SUCCEEDED
             ):
                 return global_elite.result
 
-            local_elites = copy.copy(population)
-
-            pop_fit_list = []
-            for i in range(len(population)):
-                pop_fit_list.append(population[i].score)
-            pop_fit = np.array(pop_fit_list)
-            fit_ave = round(pop_fit.mean(), 3)
-            fit_min = pop_fit.min()
+            # Members are mutated in place later, so each local elite needs an
+            # independent PopulationMember container rather than a list-only copy.
+            local_elites = [copy.copy(member) for member in population]
 
             # start iterations
-            omega = []
             for i in range(self.max_iters):
+                # Inertia is generation-specific; retaining prior generations in
+                # this list made every later iteration reuse iteration zero.
+                omega = []
+                pop_fit = np.array([member.score for member in population])
+                fit_ave = round(pop_fit.mean(), 3)
+                fit_min = pop_fit.min()
                 for k in range(len(population)):
                     if population[k].score < fit_ave:
                         omega.append(self.omega_min + ((population[k].score - fit_min) *
@@ -302,8 +321,20 @@ class LEAP(PopulationBasedSearch):
                     # calculate the probability of turning each word
                     pop_mem_words = population[k].words
                     local_elite_words = local_elites[k].words
-                    if len(pop_mem_words) != len(local_elite_words):
-                        raise ValueError("LEAP elite and population lengths differ.")
+                    expected_words = velocities.shape[1]
+                    if not (
+                        len(pop_mem_words)
+                        == len(local_elite_words)
+                        == len(global_elite.words)
+                        == expected_words
+                    ):
+                        raise ValueError(
+                            "LEAP fixed-dimensional state was violated: "
+                            f"population={len(pop_mem_words)}, "
+                            f"local_elite={len(local_elite_words)}, "
+                            f"global_elite={len(global_elite.words)}, "
+                            f"velocity={expected_words}."
+                        )
                     for d in range(len(pop_mem_words)):
                         velocities[k][d] = (
                             omega[k] * velocities[k][d]

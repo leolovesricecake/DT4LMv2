@@ -23,7 +23,7 @@ models:
     name_or_path: outputs/finetuned/debertav1base_mr/best_model
     revision: null
   new:
-    name_or_path: outputs/finetuned/debertav1base_mr/best_model
+    name_or_path: outputs/finetuned/debertav3base_mr/best_model
     revision: null
 attack:
   recipe: kuleshov_var

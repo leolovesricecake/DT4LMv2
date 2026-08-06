@@ -78,6 +78,13 @@ def model_spec(config: Mapping[str, Any], role: str) -> Mapping[str, Any]:
     return value
 
 
+def _model_config_identity(spec: Mapping[str, Any]) -> tuple[str, Any]:
+    """Return the checkpoint identity visible without filesystem access."""
+
+    source = str(spec["name_or_path"]).strip()
+    return str(Path(source).expanduser()), spec.get("revision")
+
+
 def _validate_recipe_parameters(recipe: str, parameters: Any) -> None:
     """Validate paper-facing parameters for the three formal DT4LM recipes."""
 
@@ -199,11 +206,20 @@ def validate_experiment_config(config: Mapping[str, Any]) -> None:
 
     models = _require_mapping(config, "models")
     _require(models, "id", "models")
+    model_specs = {}
     for role in ("old", "new"):
         spec = model_spec(config, role)
+        model_specs[role] = spec
         training_seed = spec.get("training_seed")
         if training_seed is not None and not isinstance(training_seed, int):
             raise ValueError(f"models.{role}.training_seed must be an integer or null.")
+    if _model_config_identity(model_specs["old"]) == _model_config_identity(
+        model_specs["new"]
+    ):
+        raise ValueError(
+            "models.old and models.new identify the same checkpoint and revision; "
+            "a differential experiment requires two distinct models."
+        )
 
     attack = _require_mapping(config, "attack")
     for key in (

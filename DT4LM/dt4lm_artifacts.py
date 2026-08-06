@@ -80,6 +80,18 @@ def validate_artifact_namespaces(config, project_root):
     """Validate model-independent samples and model-specific run artifacts."""
 
     dataset_id, model_pair_id = artifact_namespace(config)
+    models = config.get("models") or {}
+    old_spec = models.get("old") or {}
+    new_spec = models.get("new") or {}
+    old_model = resolve_model_id(project_root, old_spec)
+    new_model = resolve_model_id(project_root, new_spec)
+    same_revision = old_spec.get("revision") == new_spec.get("revision")
+    same_local_checkpoint = old_model == new_model and Path(old_model).is_absolute()
+    if old_model == new_model and (same_revision or same_local_checkpoint):
+        raise ValueError(
+            "models.old and models.new resolve to the same checkpoint; "
+            "refusing to run a degenerate differential experiment."
+        )
     dataset = config.get("dataset") or {}
     evaluation = dataset.get("evaluation") or {}
     configured = evaluation.get("manifest")

@@ -50,6 +50,39 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(len(grouped), 12)
         self.assertTrue(all(methods == METHODS for methods in grouped.values()))
 
+    def test_active_matrix_never_compares_a_checkpoint_with_itself(self):
+        for path in sorted(CONFIG_ROOT.glob("*/*.yaml")):
+            config = load_experiment_config(path)
+            old = config["models"]["old"]
+            new = config["models"]["new"]
+            self.assertNotEqual(
+                (old["name_or_path"], old.get("revision")),
+                (new["name_or_path"], new.get("revision")),
+                path,
+            )
+
+    def test_same_model_checkpoint_is_rejected_before_an_experiment(self):
+        config = load_experiment_config(
+            CONFIG_ROOT / "sst2" / "albertbasev1-v2-ff-pbs.yaml"
+        )
+        invalid = copy.deepcopy(config)
+        invalid["models"]["new"] = copy.deepcopy(invalid["models"]["old"])
+
+        with self.assertRaisesRegex(ValueError, "same checkpoint"):
+            validate_experiment_config(invalid)
+
+    def test_mr_deberta_pair_uses_v1_as_old_and_v3_as_new(self):
+        config = load_experiment_config(
+            CONFIG_ROOT / "mr" / "debertabasev1-v3-ff-pbs.yaml"
+        )
+
+        self.assertIn(
+            "debertav1base_mr", config["models"]["old"]["name_or_path"]
+        )
+        self.assertIn(
+            "debertav3base_mr", config["models"]["new"]["name_or_path"]
+        )
+
     def test_system_recipes_keep_native_search_and_explicit_parameters(self):
         expected = {
             "dt4lm-kuleshov": "kuleshov_var",
