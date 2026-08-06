@@ -55,7 +55,7 @@ if (( ${#FAILED_METHODS[@]} == 0 )); then
   exit 0
 fi
 
-echo "Failed methods (${#FAILED_METHODS[@]}):" >&2
+echo "${DATASET}|${MODEL_ID} Failed methods (${#FAILED_METHODS[@]}):" >&2
 printf '  - %s\n' "${FAILED_METHODS[@]}" >&2
 
 # 所有方法均已尝试执行，但只要存在失败项，脚本最终返回非零状态。
